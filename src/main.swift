@@ -12,9 +12,15 @@ import Darwin
 struct Sample {
     var cpu: Double = 0            // 0...100
     var gpu: Double? = nil         // 0...100，nil = 本次读不到
-    var memPct: Double = 0         // 0...100
+    var memPct: Double = 0         // 0...100（应用 + 联动 + 压缩，活动监视器口径）
     var memUsedGB: Double = 0
     var memTotalGB: Double = 0
+    // 内存分解（GB）—— 用来解释「为什么进程榜加起来远小于总量」
+    var memAppGB: Double = 0          // 匿名/应用内存
+    var memWiredGB: Double = 0        // 内核联动
+    var memCompressedGB: Double = 0   // 压缩器占用
+    var memCachedGB: Double = 0       // 文件缓存（可回收，不计入已用）
+    var memFreeGB: Double = 0
 }
 
 // ============================================================
@@ -74,9 +80,19 @@ final class CPUSampler {
 //          inactive/speculative/free 视为可回收，不计入已用。
 // ============================================================
 
+struct MemBreakdown {
+    var appGB: Double = 0
+    var wiredGB: Double = 0
+    var compressedGB: Double = 0
+    var cachedGB: Double = 0
+    var freeGB: Double = 0
+    var totalGB: Double = 0
+}
+
 final class MemorySampler {
     private let totalBytes: Double
     private var pageSize: Double = 16384
+    private(set) var last = MemBreakdown()
 
     init() {
         totalBytes = Double(MemorySampler.sysctlU64("hw.memsize"))
@@ -106,52 +122,93 @@ final class MemorySampler {
         guard kr == KERN_SUCCESS else {
             return (0, 0, totalBytes / 1_073_741_824)
         }
-        let active = Double(stats.active_count) * pageSize
-        let wired  = Double(stats.wire_count) * pageSize
+        let G = 1_073_741_824.0
+        // 活动监视器口径：已用 = 应用内存(匿名页) + 联动(wired) + 压缩器占用。
+        // 注意：不能用 active_count —— 它混进了大量 file-backed 页面（文件缓存），
+        //       那部分随时可回收，算进「已用」会让占用率虚高几十 GB。
+        let appPages = Double(stats.internal_page_count) * pageSize
+        let wired    = Double(stats.wire_count) * pageSize
         let compressed = Double(stats.compressor_page_count) * pageSize
-        let used = active + wired + compressed
+        let cached   = Double(stats.external_page_count) * pageSize
+        let freeB    = Double(stats.free_count) * pageSize
+        let used = appPages + wired + compressed
         let pct = totalBytes > 0 ? min(100, used / totalBytes * 100) : 0
-        return (pct, used / 1_073_741_824, totalBytes / 1_073_741_824)
+        self.last = MemBreakdown(appGB: appPages / G, wiredGB: wired / G,
+                                 compressedGB: compressed / G, cachedGB: cached / G,
+                                 freeGB: freeB / G, totalGB: totalBytes / G)
+        return (pct, used / G, totalBytes / G)
     }
 }
 
 // ============================================================
-// MARK: - GPU（IOAccelerator → PerformanceStatistics）
-// 免 root。ioreg 为短命子进程，约 10–20 ms/次，故单独用较长采样间隔。
+// MARK: - GPU 采样
 // ============================================================
+//
+// 不用 IOAccelerator 的 "Device Utilization %"：实测该字段会假报 0
+// （Metal 满载压测期间仍偶尔读出 0，低负载时长期为 0），不可信。
+// 改用各 GPU 客户端累计时间之和求差，稳定且与 per-process 榜同源：
+//   占用率 = Σ(所有 AGXDeviceUserClient 的 accumulatedGPUTime 增量) ÷ 墙钟
+
+/// 解析 `ioreg -c AGXDeviceUserClient` 的输出。
+/// 每个客户端实例的 `IOUserClientCreator` 是持有进程，
+/// `AppUsage` 里累计该客户端的 GPU 时间（纳秒）。
+func parseGPUClients(_ text: String) -> (total: Int, byPid: [Int32: (name: String, t: Int)]) {
+    var total = 0
+    var byPid: [Int32: (name: String, t: Int)] = [:]
+    for b in text.components(separatedBy: "+-o AGXDeviceUserClient").dropFirst() {
+        guard let r = b.range(of: "\"IOUserClientCreator\" = \"pid "),
+              let comma = b[r.upperBound...].firstIndex(of: ","),
+              let pid = Int32(b[r.upperBound..<comma]) else { continue }
+        let afterComma = b[b.index(after: comma)...]
+        guard let q = afterComma.firstIndex(of: "\"") else { continue }
+        let name = String(afterComma[..<q]).trimmingCharacters(in: .whitespaces)
+
+        var t = 0
+        var idx = b.startIndex
+        while let rr = b.range(of: "\"accumulatedGPUTime\"=", range: idx..<b.endIndex) {
+            let digits = b[rr.upperBound...].prefix(while: { $0.isNumber })
+            if let v = Int(digits) { t += v }
+            if digits.endIndex <= rr.upperBound { break }
+            idx = digits.endIndex
+        }
+        total += t
+        let prev = byPid[pid]
+        byPid[pid] = (prev?.name ?? name, (prev?.t ?? 0) + t)
+    }
+    return (total, byPid)
+}
+
+func readGPUClientTimes() -> (total: Int, byPid: [Int32: (name: String, t: Int)])? {
+    guard let text = ProcessSampler.run("/usr/sbin/ioreg",
+            ["-r", "-c", "AGXDeviceUserClient", "-l", "-w", "0"]) else { return nil }
+    return parseGPUClients(text)
+}
 
 final class GPUSampler {
-    private var cached: Double? = nil
-    private var lastRead = Date.distantPast
+    private var prevTotal: Int?
+    private var prevAt = Date()
+    private var cached: Double?
     private let interval: TimeInterval = 2.0
 
     func next() -> Double? {
         let now = Date()
-        if now.timeIntervalSince(lastRead) < interval { return cached }
-        lastRead = now
-        cached = GPUSampler.read()
+        let dt = now.timeIntervalSince(prevAt)
+        guard dt >= interval else { return cached }
+        guard let cur = readGPUClientTimes()?.total else { return cached }
+
+        prevAt = now
+        let prev = prevTotal
+        prevTotal = cur
+
+        guard let prev = prev, dt > 0.2 else { return cached }   // 首拍只建基准
+        let delta = cur - prev
+        guard delta >= 0 else { return cached }
+        cached = min(100, Double(delta) / (dt * 1_000_000_000) * 100)
         return cached
     }
 
-    /// 强制读一次（用于启动时立即取数）
-    static func read() -> Double? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
-        p.arguments = ["-r", "-d", "1", "-c", "IOAccelerator", "-w", "0"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-
-        // 取第一个出现的 "Device Utilization %"=NN
-        guard let r = text.range(of: "\"Device Utilization %\"=") else { return nil }
-        let digits = text[r.upperBound...].prefix(while: { $0.isNumber })
-        guard let v = Double(digits) else { return nil }
-        return min(100, max(0, v))
-    }
+    /// 建立基准（启动时用，避免首屏空白太久）
+    func prime() { prevTotal = readGPUClientTimes()?.total; prevAt = Date() }
 }
 
 // ============================================================
@@ -430,30 +487,7 @@ final class ProcessSampler {
     private var gpuCached: [ProcStat] = []
 
     private func readGPUclients() -> [Int32: (name: String, t: Int)] {
-        guard let out = ProcessSampler.run("/usr/sbin/ioreg",
-                ["-r", "-c", "AGXDeviceUserClient", "-l", "-w", "0"]) else { return [:] }
-        var res: [Int32: (name: String, t: Int)] = [:]
-        let blocks = out.components(separatedBy: "+-o AGXDeviceUserClient")
-        for b in blocks.dropFirst() {
-            guard let r = b.range(of: "\"IOUserClientCreator\" = \"pid "),
-                  let comma = b[r.upperBound...].firstIndex(of: ","),
-                  let pid = Int32(b[r.upperBound..<comma]) else { continue }
-            let afterComma = b[b.index(after: comma)...]
-            guard let q = afterComma.firstIndex(of: "\"") else { continue }
-            let name = String(afterComma[..<q]).trimmingCharacters(in: .whitespaces)
-
-            var total = 0
-            var idx = b.startIndex
-            while let rr = b.range(of: "\"accumulatedGPUTime\"=", range: idx..<b.endIndex) {
-                let digits = b[rr.upperBound...].prefix(while: { $0.isNumber })
-                if let v = Int(digits) { total += v }
-                if digits.endIndex <= rr.upperBound { break }
-                idx = digits.endIndex
-            }
-            let prev = res[pid]
-            res[pid] = (prev?.name ?? name, (prev?.t ?? 0) + total)
-        }
-        return res
+        readGPUClientTimes()?.byPid ?? [:]
     }
 
     func topGPU(_ n: Int = 3) -> [ProcStat] {
@@ -487,6 +521,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private var timer: Timer?
 
     private var summaryLabel: NSTextField?
+    private var breakdownLabel: NSTextField?
     private var nameLabels: [NSTextField] = []
     private var valueLabels: [NSTextField] = []
     private var toggleMenuBar: NSButton?
@@ -572,13 +607,22 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         content.addSubview(sum)
         summaryLabel = sum
 
+        // 内存分解：让「进程榜加起来才几个 GB」有处可解释
+        let bd = NSTextField(labelWithString: "")
+        bd.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        bd.textColor = .secondaryLabelColor
+        bd.lineBreakMode = .byTruncatingTail
+        bd.frame = NSRect(x: 24, y: 400, width: 372, height: 16)
+        content.addSubview(bd)
+        breakdownLabel = bd
+
         // 三段排行
-        section("CPU 占用最高", top: 396, into: content)
-        for i in 0..<3 { row(y: 370 - CGFloat(i) * 26, into: content) }
-        section("GPU 占用最高", top: 286, into: content)
-        for i in 0..<3 { row(y: 260 - CGFloat(i) * 26, into: content) }
-        section("内存占用最高（常驻 RSS）", top: 176, into: content)
-        for i in 0..<3 { row(y: 150 - CGFloat(i) * 26, into: content) }
+        section("CPU 占用最高", top: 374, into: content)
+        for i in 0..<3 { row(y: 348 - CGFloat(i) * 25, into: content) }
+        section("GPU 占用最高", top: 264, into: content)
+        for i in 0..<3 { row(y: 238 - CGFloat(i) * 25, into: content) }
+        section("内存占用最高（常驻 RSS，不含内核/压缩）", top: 154, into: content)
+        for i in 0..<3 { row(y: 128 - CGFloat(i) * 25, into: content) }
 
         // 底部按钮
         let quit = NSButton(title: "退出 DockStats", target: self, action: #selector(quitApp))
@@ -609,6 +653,9 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
             let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
             summaryLabel?.stringValue = String(format: "CPU %.0f%%　·　GPU %@　·　内存 %.1f / %.0f GB（%.0f%%）",
                                                s.cpu, gpu, s.memUsedGB, s.memTotalGB, s.memPct)
+            breakdownLabel?.stringValue = String(
+                format: "内存去向：应用 %.1f + 内核联动 %.1f + 压缩 %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
+                s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memCachedGB, s.memFreeGB)
         }
 
         let cpu = sampler.topCPU()
@@ -662,14 +709,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         procWindow = ProcessWindowController()
         procWindow.sampleProvider = { [weak self] in self?.target ?? Sample() }
 
-        // 先读一次 GPU（预热缓存），CPU 需要两次才能算增量
-        let _ = GPUSampler.read()
+        // GPU 需要两次采样才算得出占用率，先建基准
+        gpuSampler.prime()
 
         buildMenu()
         status.item.isVisible = false          // 菜单栏读数默认隐藏
 
-        // 首次采样：GPU/内存立刻有值，CPU 需要两拍才有增量
-        if let g = GPUSampler.read() { target.gpu = g; display.gpu = g }
+        // 首次采样：内存立刻有值，CPU 与 GPU 需要两拍才有增量
         let m0 = memSampler.next()
         target.memPct = m0.pct; target.memUsedGB = m0.usedGB; target.memTotalGB = m0.totalGB
         display.memPct = m0.pct; display.memUsedGB = m0.usedGB; display.memTotalGB = m0.totalGB
@@ -719,6 +765,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         target.memPct = mem.pct
         target.memUsedGB = mem.usedGB
         target.memTotalGB = mem.totalGB
+        let d = memSampler.last
+        target.memAppGB = d.appGB
+        target.memWiredGB = d.wiredGB
+        target.memCompressedGB = d.compressedGB
+        target.memCachedGB = d.cachedGB
+        target.memFreeGB = d.freeGB
         if let g = gpuSampler.next() { target.gpu = g }
     }
 
@@ -730,6 +782,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         s.memPct = display.memPct + (target.memPct - display.memPct) * k
         s.memUsedGB = target.memUsedGB
         s.memTotalGB = target.memTotalGB
+        s.memAppGB = target.memAppGB
+        s.memWiredGB = target.memWiredGB
+        s.memCompressedGB = target.memCompressedGB
+        s.memCachedGB = target.memCachedGB
+        s.memFreeGB = target.memFreeGB
         if let tg = target.gpu {
             let cur = display.gpu ?? tg
             s.gpu = cur + (tg - cur) * k
@@ -834,12 +891,12 @@ if CommandLine.arguments.contains("--dump") {
     let memS = MemorySampler()
     let gpuS = GPUSampler()
 
-    _ = cpuS.next()                      // 建基准
-    let gpuA = GPUSampler.read()
-    Thread.sleep(forTimeInterval: 1.0)
+    _ = cpuS.next()                      // CPU 建基准
+    gpuS.prime()                         // GPU 建基准
+    Thread.sleep(forTimeInterval: 2.2)   // 必须跨过 GPU 的 2s 采样间隔
     let cpu = cpuS.next() ?? 0
     let mem = memS.next()
-    let gpuB = gpuS.next() ?? gpuA
+    let gpuB = gpuS.next()
 
     var s = Sample()
     s.cpu = cpu
@@ -847,6 +904,9 @@ if CommandLine.arguments.contains("--dump") {
     s.memPct = mem.pct
     s.memUsedGB = mem.usedGB
     s.memTotalGB = mem.totalGB
+    let d = memS.last
+    s.memAppGB = d.appGB; s.memWiredGB = d.wiredGB; s.memCompressedGB = d.compressedGB
+    s.memCachedGB = d.cachedGB; s.memFreeGB = d.freeGB
 
     // --mock=CPU,GPU,MEM：强制指定显示数值，用于验收边界态（如 100/100/100）
     if let mock = CommandLine.arguments.first(where: { $0.hasPrefix("--mock=") }) {
@@ -861,6 +921,11 @@ if CommandLine.arguments.contains("--dump") {
                  s.cpu,
                  s.gpu.map { String(format: "%.1f", $0) } ?? "nil",
                  s.memPct, s.memUsedGB, s.memTotalGB, gpuName()))
+    if CommandLine.arguments.contains("--verbose") {
+        print(String(format: "  mem: 应用 %.1f + 联动 %.1f + 压缩 %.1f = %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
+                     s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memUsedGB,
+                     s.memCachedGB, s.memFreeGB))
+    }
 
     let icon = makeDockIcon(s)
     if let tiff = icon.tiffRepresentation,
