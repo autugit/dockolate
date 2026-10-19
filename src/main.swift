@@ -196,30 +196,45 @@ func levelColor(_ pct: Double) -> NSColor {
 
 func pctNumber(_ v: Double) -> String { String(format: "%.0f", v) }
 
-/// 格子里画：淡色底 + 左上标签 + 居中大号数字（带小号 %）+ 底部细进度条
-func drawCell(_ r: NSRect, label: String, number: String,
-              pct: Double, color: NSColor, maxFontSize: CGFloat) {
-    let box = NSBezierPath(roundedRect: r, xRadius: 15, yRadius: 15)
-    color.withAlphaComponent(0.15).setFill()
+/// 格子里画：淡底 → 大号半透明水印字母（压在数字后面）→ 居中大数字（可带前缀）→ 底部细进度条
+/// - watermark: 上排 C / G，作为背景大字
+/// - prefix:    下排 "M"，作为数字前缀
+func drawCell(_ r: NSRect,
+              watermark: String? = nil,
+              prefix: String? = nil,
+              number: String,
+              pct: Double,
+              color: NSColor,
+              maxFontSize: CGFloat) {
+
+    let box = NSBezierPath(roundedRect: r, xRadius: 19, yRadius: 19)
+    color.withAlphaComponent(0.13).setFill()
     box.fill()
-    color.withAlphaComponent(0.50).setStroke()
+    color.withAlphaComponent(0.45).setStroke()
     box.lineWidth = 1.5
     box.stroke()
 
-    let lAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-        .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.60),
-    ]
-    let ls = (label as NSString).size(withAttributes: lAttrs)
-    (label as NSString).draw(at: NSPoint(x: r.minX + 9, y: r.maxY - ls.height - 6),
-                             withAttributes: lAttrs)
+    // 水印大字（裁到格子内，半透明，压在大数字后面）
+    if let wm = watermark {
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: r, xRadius: 19, yRadius: 19).addClip()
+        let wAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: r.height * 1.0, weight: .black),
+            .foregroundColor: color.withAlphaComponent(0.20),
+        ]
+        let ws = (wm as NSString).size(withAttributes: wAttrs)
+        (wm as NSString).draw(at: NSPoint(x: r.midX - ws.width / 2, y: r.midY - ws.height / 2),
+                              withAttributes: wAttrs)
+        NSGraphicsContext.restoreGraphicsState()
+    }
 
-    let barH: CGFloat = 6
-    let barPad: CGFloat = 9
-    let trackRect = NSRect(x: r.minX + barPad, y: r.minY + 7,
+    // 底部细进度条
+    let barH: CGFloat = 7
+    let barPad: CGFloat = 10
+    let trackRect = NSRect(x: r.minX + barPad, y: r.minY + 8,
                            width: r.width - barPad * 2, height: barH)
     let track = NSBezierPath(roundedRect: trackRect, xRadius: barH / 2, yRadius: barH / 2)
-    NSColor(calibratedWhite: 1.0, alpha: 0.16).setFill()
+    NSColor(calibratedWhite: 1.0, alpha: 0.15).setFill()
     track.fill()
     let frac = CGFloat(min(100, max(0, pct)) / 100)
     if frac > 0.001 {
@@ -231,36 +246,46 @@ func drawCell(_ r: NSRect, label: String, number: String,
         f.fill()
     }
 
-    // 大号数字：按可用宽度自动取最大能装下的字号，保证「100」也不溢出
-    let maxW = r.width - 20
+    // 大号数字：宽、高双重约束下取最大字号，保证「100%」不溢出
+    let maxW = r.width - 12
+    let maxH = r.height - barH - 16
+
     func build(_ size: CGFloat) -> (NSMutableAttributedString, CGFloat, CGFloat) {
-        let nAttrs: [NSAttributedString.Key: Any] = [
+        let m = NSMutableAttributedString()
+        if let p = prefix {
+            m.append(NSAttributedString(string: p + " ", attributes: [
+                .font: NSFont.systemFont(ofSize: size * 0.62, weight: .black),
+                .foregroundColor: color.withAlphaComponent(0.58),
+            ]))
+        }
+        m.append(NSAttributedString(string: number, attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .heavy),
             .foregroundColor: color,
-        ]
-        let pAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: size * 0.46, weight: .bold),
+        ]))
+        m.append(NSAttributedString(string: "%", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: size * 0.40, weight: .bold),
             .foregroundColor: color.withAlphaComponent(0.85),
-        ]
-        let m = NSMutableAttributedString(string: number, attributes: nAttrs)
-        m.append(NSAttributedString(string: "%", attributes: pAttrs))
+        ]))
         let sz = m.size()
         return (m, sz.width, sz.height)
     }
+
     var size = maxFontSize
     var (att, w, h) = build(size)
-    if w > maxW, w > 0 {
-        size = max(size * maxW / w, 10)
+    var guardCount = 0
+    while (w > maxW || h > maxH) && size > 9 && guardCount < 40 {
+        let k = min(maxW / max(w, 1), maxH / max(h, 1))
+        size *= (k < 1 ? max(k * 0.98, 0.5) : 0.9)
         (att, w, h) = build(size)
+        guardCount += 1
     }
 
-    let bandTop = r.maxY - 24
-    let bandBot = r.minY + barH + 12
-    let y = (bandTop + bandBot) / 2 - h / 2
+    let bandBot = r.minY + barH + 16
+    let y = (r.maxY + bandBot) / 2 - h / 2
     att.draw(at: NSPoint(x: r.midX - w / 2, y: y))
 }
 
-// MARK: Dock 图标（256×256：上二下一 · 大号数字）
+// MARK: Dock 图标（256×256：上二下一 · 大号数字 · C/G 水印 M 前缀）
 func makeDockIcon(_ s: Sample) -> NSImage {
     let side: CGFloat = 256
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -271,7 +296,7 @@ func makeDockIcon(_ s: Sample) -> NSImage {
         bg.lineWidth = 2
         bg.stroke()
 
-        let margin: CGFloat = 32
+        let margin: CGFloat = 24
         let gap: CGFloat = 12
         let inner = side - margin * 2
         let cellW = (inner - gap) / 2
@@ -283,19 +308,19 @@ func makeDockIcon(_ s: Sample) -> NSImage {
         let gpuRect = NSRect(x: margin + cellW + gap, y: topY, width: cellW, height: cellH)
         let memRect = NSRect(x: margin, y: botY, width: inner, height: cellH)
 
-        drawCell(cpuRect, label: "CPU", number: pctNumber(s.cpu),
-                 pct: s.cpu, color: levelColor(s.cpu), maxFontSize: 50)
+        drawCell(cpuRect, watermark: "C", number: pctNumber(s.cpu),
+                 pct: s.cpu, color: levelColor(s.cpu), maxFontSize: 80)
 
         if let g = s.gpu {
-            drawCell(gpuRect, label: "GPU", number: pctNumber(g),
-                     pct: g, color: levelColor(g), maxFontSize: 50)
+            drawCell(gpuRect, watermark: "G", number: pctNumber(g),
+                     pct: g, color: levelColor(g), maxFontSize: 80)
         } else {
-            drawCell(gpuRect, label: "GPU", number: "—", pct: 0,
-                     color: NSColor(calibratedWhite: 0.50, alpha: 1), maxFontSize: 50)
+            drawCell(gpuRect, watermark: "G", number: "—", pct: 0,
+                     color: NSColor(calibratedWhite: 0.50, alpha: 1), maxFontSize: 80)
         }
 
-        drawCell(memRect, label: "MEM", number: pctNumber(s.memPct),
-                 pct: s.memPct, color: levelColor(s.memPct), maxFontSize: 64)
+        drawCell(memRect, prefix: "M", number: pctNumber(s.memPct),
+                 pct: s.memPct, color: levelColor(s.memPct), maxFontSize: 96)
 
         return true
     }
@@ -338,25 +363,192 @@ final class StatusItemController {
 }
 
 // ============================================================
-// MARK: - 详情窗口（点击 Dock 图标 / 菜单项时出现）
+// MARK: - 进程排行采样（点击 Dock 图标时的窗口）
 // ============================================================
 
-final class DetailWindowController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
-    private var labels: [String: NSTextField] = [:]
-    private let chip: String
+struct ProcStat {
+    let pid: Int32
+    let name: String
+    let value: Double      // CPU: % ／ 内存: bytes ／ GPU: % of one GPU-second
+}
 
-    init(chip: String) { self.chip = chip; super.init() }
+final class ProcessSampler {
+
+    // ---------- 通用子进程 ----------
+    static func run(_ path: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let s = String(data: data, encoding: .utf8), !s.isEmpty else { return nil }
+        return s
+    }
+
+    private static func shortName(_ path: String) -> String {
+        let base = (path as NSString).lastPathComponent
+        return base.isEmpty ? path : base
+    }
+
+    // ---------- CPU / 内存：ps ----------
+    private func psTop(_ n: Int, sortFlag: String, valueKey: String) -> [ProcStat] {
+        guard let out = ProcessSampler.run("/bin/ps",
+                ["-A", "-o", "pid=,\(valueKey)=,comm=", sortFlag]) else { return [] }
+        var res: [ProcStat] = []
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard parts.count == 3,
+                  let pid = Int32(parts[0]),
+                  let v = Double(parts[1]) else { continue }
+            res.append(ProcStat(pid: pid, name: ProcessSampler.shortName(String(parts[2])), value: v))
+            if res.count >= n { break }
+        }
+        return res
+    }
+
+    func topCPU(_ n: Int = 3) -> [ProcStat] {
+        psTop(n, sortFlag: "-r", valueKey: "pcpu")           // -r: 按 CPU 降序
+    }
+
+    func topMemory(_ n: Int = 3) -> [ProcStat] {
+        // rss 单位 KB → bytes
+        psTop(n, sortFlag: "-m", valueKey: "rss").map {
+            ProcStat(pid: $0.pid, name: $0.name, value: $0.value * 1024)
+        }
+    }
+
+    // ---------- GPU：AGXDeviceUserClient 的 accumulatedGPUTime 增量 ----------
+    // 每个 GPU 用户客户端实例的 IOUserClientCreator 就是持有进程，
+    // AppUsage 里累积了该客户端的 GPU 时间（纳秒）。
+    // 两次采样求差 ÷ 墙钟 ⇒ 该进程占用了多少个「整颗 GPU」的算力。
+    private var gpuPrev: [Int32: (name: String, t: Int)] = [:]
+    private var gpuPrevAt = Date()
+    private var gpuCached: [ProcStat] = []
+
+    private func readGPUclients() -> [Int32: (name: String, t: Int)] {
+        guard let out = ProcessSampler.run("/usr/sbin/ioreg",
+                ["-r", "-c", "AGXDeviceUserClient", "-l", "-w", "0"]) else { return [:] }
+        var res: [Int32: (name: String, t: Int)] = [:]
+        let blocks = out.components(separatedBy: "+-o AGXDeviceUserClient")
+        for b in blocks.dropFirst() {
+            guard let r = b.range(of: "\"IOUserClientCreator\" = \"pid "),
+                  let comma = b[r.upperBound...].firstIndex(of: ","),
+                  let pid = Int32(b[r.upperBound..<comma]) else { continue }
+            let afterComma = b[b.index(after: comma)...]
+            guard let q = afterComma.firstIndex(of: "\"") else { continue }
+            let name = String(afterComma[..<q]).trimmingCharacters(in: .whitespaces)
+
+            var total = 0
+            var idx = b.startIndex
+            while let rr = b.range(of: "\"accumulatedGPUTime\"=", range: idx..<b.endIndex) {
+                let digits = b[rr.upperBound...].prefix(while: { $0.isNumber })
+                if let v = Int(digits) { total += v }
+                if digits.endIndex <= rr.upperBound { break }
+                idx = digits.endIndex
+            }
+            let prev = res[pid]
+            res[pid] = (prev?.name ?? name, (prev?.t ?? 0) + total)
+        }
+        return res
+    }
+
+    func topGPU(_ n: Int = 3) -> [ProcStat] {
+        let now = Date()
+        let cur = readGPUclients()
+        let dt = now.timeIntervalSince(gpuPrevAt)
+        defer { gpuPrev = cur; gpuPrevAt = now }
+        guard !gpuPrev.isEmpty, dt > 0.2 else { return gpuCached }
+
+        var res: [ProcStat] = []
+        for (pid, v) in cur {
+            guard let old = gpuPrev[pid] else { continue }
+            let d = v.t - old.t
+            guard d > 0 else { continue }
+            res.append(ProcStat(pid: pid, name: ProcessSampler.shortName(v.name),
+                                value: Double(d) / (dt * 1_000_000_000) * 100))
+        }
+        res.sort { $0.value > $1.value }
+        gpuCached = Array(res.prefix(n))
+        return gpuCached
+    }
+}
+
+// ============================================================
+// MARK: - 进程榜窗口（点 Dock 图标 / 菜单打开）
+// ============================================================
+
+final class ProcessWindowController: NSObject, NSWindowDelegate {
+    private var window: NSWindow?
+    private let sampler = ProcessSampler()
+    private var timer: Timer?
+
+    private var summaryLabel: NSTextField?
+    private var nameLabels: [NSTextField] = []
+    private var valueLabels: [NSTextField] = []
+    private var toggleMenuBar: NSButton?
+
+    /// 由 AppDelegate 注入：取当前总占用率
+    var sampleProvider: (() -> Sample)?
 
     func show() {
         if window == nil { build() }
         guard let w = window else { return }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        startTimer()
+        refresh()
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        // 首次调用 GPU 只建立基准（无差值），第二次起才有数
+        _ = sampler.topGPU()
+        let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        stopTimer()   // 窗口关了就不再采样，空载零代价
+    }
+
+    private func section(_ title: String, top: CGFloat, into content: NSView) {
+        let t = NSTextField(labelWithString: title)
+        t.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        t.textColor = .tertiaryLabelColor
+        t.frame = NSRect(x: 24, y: top, width: 340, height: 16)
+        content.addSubview(t)
+    }
+
+    private func row(y: CGFloat, into content: NSView) {
+        let name = NSTextField(labelWithString: "—")
+        name.font = NSFont.systemFont(ofSize: 13)
+        name.textColor = .labelColor
+        name.lineBreakMode = .byTruncatingMiddle
+        name.frame = NSRect(x: 24, y: y, width: 270, height: 18)
+        content.addSubview(name)
+
+        let val = NSTextField(labelWithString: "")
+        val.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        val.alignment = .right
+        val.frame = NSRect(x: 300, y: y, width: 96, height: 18)
+        content.addSubview(val)
+
+        nameLabels.append(name)
+        valueLabels.append(val)
     }
 
     private func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 300),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 486),
                          styleMask: [.titled, .closable, .miniaturizable],
                          backing: .buffered, defer: false)
         w.title = "DockStats"
@@ -367,52 +559,84 @@ final class DetailWindowController: NSObject, NSWindowDelegate {
         let content = NSView(frame: w.contentLayoutRect)
         w.contentView = content
 
-        var y: CGFloat = content.bounds.height - 54
-        let title = NSTextField(labelWithString: "实时占用率")
-        title.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
-        title.frame = NSRect(x: 24, y: y - 4, width: 320, height: 24)
-        content.addSubview(title)
+        // 顶部总览
+        let s = NSTextField(labelWithString: "当前总占用")
+        s.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        s.textColor = .tertiaryLabelColor
+        s.frame = NSRect(x: 24, y: 452, width: 200, height: 16)
+        content.addSubview(s)
 
-        y -= 34
-        for key in ["CPU", "GPU", "MEM"] {
-            let name = NSTextField(labelWithString: key)
-            name.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .bold)
-            name.textColor = .secondaryLabelColor
-            name.frame = NSRect(x: 24, y: y, width: 60, height: 20)
-            content.addSubview(name)
+        let sum = NSTextField(labelWithString: "—")
+        sum.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        sum.frame = NSRect(x: 24, y: 428, width: 372, height: 20)
+        content.addSubview(sum)
+        summaryLabel = sum
 
-            let val = NSTextField(labelWithString: "—")
-            val.font = NSFont.monospacedDigitSystemFont(ofSize: 20, weight: .bold)
-            val.frame = NSRect(x: 84, y: y - 4, width: 270, height: 26)
-            content.addSubview(val)
-            labels[key] = val
-            y -= 46
-        }
+        // 三段排行
+        section("CPU 占用最高", top: 396, into: content)
+        for i in 0..<3 { row(y: 370 - CGFloat(i) * 26, into: content) }
+        section("GPU 占用最高", top: 286, into: content)
+        for i in 0..<3 { row(y: 260 - CGFloat(i) * 26, into: content) }
+        section("内存占用最高（常驻 RSS）", top: 176, into: content)
+        for i in 0..<3 { row(y: 150 - CGFloat(i) * 26, into: content) }
 
-        let note = NSTextField(labelWithString: "采样：CPU/内存 1 秒，GPU 1.5 秒\nGPU 数据源：IOAccelerator · \(chip)")
-        note.font = NSFont.systemFont(ofSize: 11)
-        note.textColor = .tertiaryLabelColor
-        note.frame = NSRect(x: 24, y: 20, width: 330, height: 40)
-        note.maximumNumberOfLines = 2
-        content.addSubview(note)
+        // 底部按钮
+        let quit = NSButton(title: "退出 DockStats", target: self, action: #selector(quitApp))
+        quit.bezelStyle = .rounded
+        quit.frame = NSRect(x: 300, y: 24, width: 96, height: 28)
+        content.addSubview(quit)
+
+        let toggle = NSButton(title: "菜单栏读数", target: self, action: #selector(toggleMenuBarItem(_:)))
+        toggle.bezelStyle = .rounded
+        toggle.setButtonType(.pushOnPushOff)
+        toggle.frame = NSRect(x: 24, y: 24, width: 110, height: 28)
+        content.addSubview(toggle)
+        toggleMenuBar = toggle
 
         self.window = w
     }
 
-    func update(_ s: Sample) {
+    @objc private func quitApp() { NSApp.terminate(nil) }
+
+    @objc private func toggleMenuBarItem(_ sender: NSButton) {
+        (NSApp.delegate as? AppDelegate)?.setMenuBarVisible(sender.state == .on)
+    }
+
+    func refresh() {
         guard window != nil else { return }
-        labels["CPU"]?.stringValue = String(format: "%.1f %%", s.cpu)
-        labels["CPU"]?.textColor = levelColor(s.cpu)
-        if let g = s.gpu {
-            labels["GPU"]?.stringValue = String(format: "%.1f %%", g)
-            labels["GPU"]?.textColor = levelColor(g)
-        } else {
-            labels["GPU"]?.stringValue = "不可读"
-            labels["GPU"]?.textColor = .secondaryLabelColor
+
+        if let s = sampleProvider?() {
+            let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
+            summaryLabel?.stringValue = String(format: "CPU %.0f%%　·　GPU %@　·　内存 %.1f / %.0f GB（%.0f%%）",
+                                               s.cpu, gpu, s.memUsedGB, s.memTotalGB, s.memPct)
         }
-        labels["MEM"]?.stringValue = String(format: "%.1f %%　(%.1f / %.0f GB)",
-                                            s.memPct, s.memUsedGB, s.memTotalGB)
-        labels["MEM"]?.textColor = levelColor(s.memPct)
+
+        let cpu = sampler.topCPU()
+        let gpu = sampler.topGPU()
+        let mem = sampler.topMemory()
+
+        for (section, stats) in [(0, cpu), (1, gpu), (2, mem)] {
+            for i in 0..<3 {
+                let idx = section * 3 + i
+                guard idx < nameLabels.count else { continue }
+                if i < stats.count {
+                    let st = stats[i]
+                    nameLabels[idx].stringValue = st.name
+                    switch section {
+                    case 0:  valueLabels[idx].stringValue = String(format: "%.1f%%", st.value)
+                    case 1:  valueLabels[idx].stringValue = String(format: "%.1f%%", st.value)
+                    default: valueLabels[idx].stringValue = String(format: "%.2f GB",
+                                                                   st.value / 1_073_741_824)
+                    }
+                    valueLabels[idx].textColor = section == 2
+                        ? .labelColor
+                        : levelColor(min(100, st.value))
+                } else {
+                    nameLabels[idx].stringValue = "—"
+                    valueLabels[idx].stringValue = ""
+                }
+            }
+        }
     }
 }
 
@@ -425,7 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let memSampler = MemorySampler()
     private let gpuSampler = GPUSampler()
     private let status = StatusItemController()
-    private var detail: DetailWindowController!
+    private var procWindow: ProcessWindowController!
     private var timer: Timer?
     private var animator: Timer?
     private var lastIcon: NSImage?
@@ -435,13 +659,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDrawn = Sample(cpu: -1, gpu: -1, memPct: -1, memUsedGB: 0, memTotalGB: 0)
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        detail = DetailWindowController(chip: gpuName())
+        procWindow = ProcessWindowController()
+        procWindow.sampleProvider = { [weak self] in self?.target ?? Sample() }
 
         // 先读一次 GPU（预热缓存），CPU 需要两次才能算增量
         let _ = GPUSampler.read()
 
         buildMenu()
-        status.item.isVisible = true
+        status.item.isVisible = false          // 菜单栏读数默认隐藏
 
         // 首次采样：GPU/内存立刻有值，CPU 需要两拍才有增量
         if let g = GPUSampler.read() { target.gpu = g; display.gpu = g }
@@ -469,9 +694,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dockswitch.target = self
         menu.addItem(dockswitch)
 
-        let detailItem = NSMenuItem(title: "打开详情窗口", action: #selector(openDetail(_:)), keyEquivalent: "d")
-        detailItem.target = self
-        menu.addItem(detailItem)
+        let winswitch = NSMenuItem(title: "显示菜单栏读数", action: #selector(toggleMenuBarItem(_:)), keyEquivalent: "")
+        winswitch.state = .off
+        winswitch.target = self
+        menu.addItem(winswitch)
+
+        let openItem = NSMenuItem(title: "打开进程排行窗口", action: #selector(openProcWindow(_:)), keyEquivalent: "d")
+        openItem.target = self
+        menu.addItem(openItem)
 
         menu.addItem(.separator())
 
@@ -511,7 +741,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if abs(s.memPct - target.memPct) < 0.2 { s.memPct = target.memPct }
         display = s
 
-        status.update(s)
+        if status.item.isVisible { status.update(s) }
         if showDockIcon {
             // 图标上显示的是整数百分比 ⇒ 只有整数位变了才值得重绘。
             // 小数位的抖动肉眼看不出，却会让 Dock 每 0.5 秒重合成一次、白烧 CPU。
@@ -532,7 +762,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastDrawn = s
             }
         }
-        detail.update(s)
     }
 
     @objc private func toggleDock(_ sender: NSMenuItem) {
@@ -541,17 +770,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if showDockIcon { tick() }
     }
 
-    @objc private func openDetail(_ sender: Any?) {
-        detail.show()
+    @objc private func openProcWindow(_ sender: Any?) {
+        procWindow.show()
+    }
+
+    @objc private func toggleMenuBarItem(_ sender: NSMenuItem) {
+        let on = !status.item.isVisible
+        setMenuBarVisible(on)
+        sender.state = on ? .on : .off
+    }
+
+    /// 菜单栏读数开关（窗口里的按钮也走这里）
+    func setMenuBarVisible(_ visible: Bool) {
+        status.item.isVisible = visible
+        if visible { status.update(display) }
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 
-    // 点 Dock 图标（有/无窗口）都弹出详情
+    // 点 Dock 图标（有/无窗口）都弹出进程排行窗口
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        detail.show()
+        procWindow.show()
         return true
     }
 
@@ -565,6 +806,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // ============================================================
 
 // ---- 自检模式：--dump 采样一次并把 Dock 图标写成 PNG（用于无屏幕录制权限时的实测验证）----
+// ---- 自检模式：--procs 打印三榜（窗口内容的数据源），用于无 GUI 时验证采样 ----
+if CommandLine.arguments.contains("--procs") {
+    let sampler = ProcessSampler()
+    _ = sampler.topGPU()                            // 建立 GPU 基准
+    Thread.sleep(forTimeInterval: 1.5)
+    let cpu = sampler.topCPU()
+    let gpu = sampler.topGPU()
+    let mem = sampler.topMemory()
+    print("=== CPU 占用最高 ===")
+    for s in cpu { print(String(format: "  %-32s %6.1f%%  (pid %d)", (s.name as NSString).utf8String!, s.value, s.pid)) }
+    print("=== GPU 占用最高（% of one GPU）===")
+    if gpu.isEmpty { print("  (首拍无基准)") }
+    for s in gpu { print(String(format: "  %-32s %6.1f%%  (pid %d)", (s.name as NSString).utf8String!, s.value, s.pid)) }
+    print("=== 内存占用最高（常驻 RSS）===")
+    for s in mem { print(String(format: "  %-32s %6.2f GB  (pid %d)", (s.name as NSString).utf8String!, s.value / 1_073_741_824, s.pid)) }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--dump") {
     _ = NSApplication.shared   // 初始化 AppKit（字体/颜色/绘图上下文）
     let outDir = CommandLine.arguments
