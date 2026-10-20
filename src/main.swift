@@ -490,6 +490,26 @@ final class ProcessSampler {
         readGPUClientTimes()?.byPid ?? [:]
     }
 
+    /// 换页情况：vm.swapusage（窗口打开时才查，图标不显示）
+    func swapUsage() -> (usedGB: Double, totalGB: Double) {
+        guard let out = ProcessSampler.run("/usr/sbin/sysctl", ["-n", "vm.swapusage"]) else {
+            return (0, 0)
+        }
+        func value(_ key: String) -> Double {
+            guard let r = out.range(of: "\(key) = ") else { return 0 }
+            let rest = out[r.upperBound...]
+            let num = rest.prefix { $0.isNumber || $0 == "." }
+            guard let v = Double(num), num.endIndex < rest.endIndex else { return 0 }
+            switch rest[num.endIndex] {
+            case "G": return v
+            case "M": return v / 1024
+            case "K": return v / 1_048_576
+            default:  return v / 1_073_741_824
+            }
+        }
+        return (value("used"), value("total"))
+    }
+
     func topGPU(_ n: Int = 3) -> [ProcStat] {
         let now = Date()
         let cur = readGPUclients()
@@ -522,6 +542,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
 
     private var summaryLabel: NSTextField?
     private var breakdownLabel: NSTextField?
+    private var swapLabel: NSTextField?
     private var nameLabels: [NSTextField] = []
     private var valueLabels: [NSTextField] = []
     private var toggleMenuBar: NSButton?
@@ -616,13 +637,22 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         content.addSubview(bd)
         breakdownLabel = bd
 
+        // 换页（压缩内存见上一行；图标上不显示这两项，只在这里看）
+        let sw = NSTextField(labelWithString: "")
+        sw.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        sw.textColor = .secondaryLabelColor
+        sw.lineBreakMode = .byTruncatingTail
+        sw.frame = NSRect(x: 24, y: 384, width: 372, height: 16)
+        content.addSubview(sw)
+        swapLabel = sw
+
         // 三段排行
-        section("CPU 占用最高", top: 374, into: content)
-        for i in 0..<3 { row(y: 348 - CGFloat(i) * 25, into: content) }
-        section("GPU 占用最高", top: 264, into: content)
-        for i in 0..<3 { row(y: 238 - CGFloat(i) * 25, into: content) }
-        section("内存占用最高（常驻 RSS，不含内核/压缩）", top: 154, into: content)
-        for i in 0..<3 { row(y: 128 - CGFloat(i) * 25, into: content) }
+        section("CPU 占用最高", top: 356, into: content)
+        for i in 0..<3 { row(y: 330 - CGFloat(i) * 25, into: content) }
+        section("GPU 占用最高", top: 246, into: content)
+        for i in 0..<3 { row(y: 220 - CGFloat(i) * 25, into: content) }
+        section("内存占用最高（常驻 RSS，不含内核/压缩）", top: 136, into: content)
+        for i in 0..<3 { row(y: 110 - CGFloat(i) * 25, into: content) }
 
         // 底部按钮
         let quit = NSButton(title: "退出 DockStats", target: self, action: #selector(quitApp))
@@ -656,6 +686,13 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
             breakdownLabel?.stringValue = String(
                 format: "内存去向：应用 %.1f + 内核联动 %.1f + 压缩 %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
                 s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memCachedGB, s.memFreeGB)
+
+            let sw = sampler.swapUsage()
+            if sw.totalGB > 0.01 {
+                swapLabel?.stringValue = String(format: "已换页（swap）：%.1f GB / 上限 %.1f GB", sw.usedGB, sw.totalGB)
+            } else {
+                swapLabel?.stringValue = "已换页（swap）：未使用"
+            }
         }
 
         let cpu = sampler.topCPU()
@@ -878,6 +915,8 @@ if CommandLine.arguments.contains("--procs") {
     for s in gpu { print(String(format: "  %-32s %6.1f%%  (pid %d)", (s.name as NSString).utf8String!, s.value, s.pid)) }
     print("=== 内存占用最高（常驻 RSS）===")
     for s in mem { print(String(format: "  %-32s %6.2f GB  (pid %d)", (s.name as NSString).utf8String!, s.value / 1_073_741_824, s.pid)) }
+    let sw = sampler.swapUsage()
+    print(String(format: "=== 换页 swap：%.1f / %.1f GB ===", sw.usedGB, sw.totalGB))
     exit(0)
 }
 
