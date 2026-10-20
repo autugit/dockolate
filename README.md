@@ -2,6 +2,11 @@
 
 **A chocolate bar in your Dock — water-level gauge for CPU / GPU / memory, plus a live inventory of the local AI models actually loaded in RAM.**
 
+<p align="center">
+  <img src="docs/img/dock-icon.png" width="140" alt="Dock icon: four cells, C / G / M / Z water levels">
+  <img src="docs/img/window.png" width="440" alt="Window: local AI models, top processes, memory breakdown">
+</p>
+
 No Electron. No dependencies. One `swiftc` invocation. ~2% CPU, ~96 MB RSS.
 
 ```
@@ -112,8 +117,8 @@ Zero config works. To reach engines elsewhere or behind an API key, create
 }
 ```
 
-Keys may also come from the environment: `DOCKSTATS_KEY_<port>`, or a global
-`DOCKSTATS_KEY`. Engines that require auth answer 401 without a key — Dockolate
+Keys may also come from the environment: `DOCKOLATE_KEY_<port>`, or a global
+`DOCKOLATE_KEY`. Engines that require auth answer 401 without a key — Dockolate
 then shows the engine name and port instead of a model name, and never guesses.
 
 ## Diagnostics (no GUI, no screen-recording permission)
