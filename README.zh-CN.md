@@ -54,16 +54,20 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 
 ## 支持哪些本地引擎（通用探测，不依赖任何一家私有网关）
 
-| 引擎 | 默认端口 | 模型名怎么来 |
-|---|---|---|
-| Ollama | 11434 | `GET /api/ps`（在跑）+ `GET /api/tags`（已下载 → 未加载清单） |
-| LM Studio | 1234 | `GET /api/v0/models` 的 `state == "loaded"` |
-| llama.cpp `llama-server` | 8080 / 8081 / 8082 | `GET /v1/models`，取不到再从 `--model` 参数抠 |
-| vLLM / MLX / oMLX | 8000 / 8001 | `GET /v1/models` |
-| ComfyUI | 8188 / 8189 | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
-| A1111 / Forge / Draw Things | 7860 / 7861 | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
-| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | 8888 / 9090 / 5001 / 5000 | `GET /v1/models` |
-| 应用内模型（Draw Things、LM Studio 桌面版） | — | 进程指纹 + `phys_footprint` |
+**端口是探测出来的，不是写死的。** 先看被识别为模型服务的进程实际监听了哪些端口，
+所以你把服务挪到自定义端口照样认得出；内置的一张小默认表只在「进程认不出来」时兜底，
+其余可以在 `engines.json` 里补。下面这张表列的是**询问方式**，不是端口要求。
+
+| 引擎 | 模型名怎么来 |
+|---|---|
+| Ollama | `GET /api/ps`（在跑）+ `GET /api/tags`（已下载 → 未加载清单） |
+| LM Studio | `GET /api/v0/models` 的 `state == "loaded"` |
+| llama.cpp `llama-server` | `GET /v1/models`，取不到再从 `--model` 参数抠 |
+| vLLM / MLX / oMLX | `GET /v1/models` |
+| ComfyUI | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
+| A1111 / Forge / Draw Things | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
+| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | `GET /v1/models` |
+| 应用内模型（Draw Things、LM Studio 桌面版） | 进程指纹 + `phys_footprint` |
 
 状态口径：**正在运行** = 端口在应答且最近 12 秒内真算过东西（CPU 或 GPU 时间在涨）；
 **挂载待机** = 权重在内存、端口在应答、没在算；**出现故障** = 进程占着端口但端口不应答；
@@ -73,7 +77,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 配置 `~/Library/Application Support/Dockolate/engines.json`：
 
 ```json
-{ "extraPorts": [9000], "apiKeys": { "8000": "sk-your-key" } }
+{ "extraPorts": [12345], "apiKeys": { "12345": "sk-your-key" } }
 ```
 
 也支持环境变量 `DOCKOLATE_KEY_<端口>` 或 `DOCKOLATE_KEY`。
