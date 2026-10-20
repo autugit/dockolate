@@ -832,6 +832,53 @@ final class LocalModelSampler {
         return out.isEmpty ? nil : out
     }
 
+    // ---------- ComfyUI：抓出它正在跑的工作流用的权重文件 ----------
+    /// ComfyUI 没有「当前加载了什么模型」的接口，但 `/queue`（正在跑的任务）与
+    /// `/history`（最近一次任务）里的工作流节点都带着 `ckpt_name` / `unet_name`。
+    /// 先队列、后历史 —— 队列里有就说明此刻在跑它，否则只代表「最近跑过」。
+    private func comfyModelName(port: Int) -> (name: String, inQueue: Bool)? {
+        for (path, inQueue) in [("/queue", true), ("/history?max_items=1", false)] {
+            guard let body = httpBody(port: port, path: path),
+                  let data = body.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) else { continue }
+            if let raw = firstWeightName(obj) { return (cleanWeightName(raw), inQueue) }
+        }
+        return nil
+    }
+
+    /// 深度遍历工作流节点，优先 ckpt / unet，其次通用 model 字段（LoRA、VAE 名不作为主模型）
+    private func firstWeightName(_ obj: Any) -> String? {
+        var ckpt: String?
+        var unet: String?
+        var generic: String?
+        func walk(_ v: Any) {
+            if let d = v as? [String: Any] {
+                if let inputs = d["inputs"] as? [String: Any] {
+                    if ckpt == nil, let s = inputs["ckpt_name"] as? String, !s.isEmpty { ckpt = s }
+                    if unet == nil, let s = inputs["unet_name"] as? String, !s.isEmpty { unet = s }
+                    if generic == nil {
+                        for k in ["diffusion_model", "model_name", "gguf_name"] {
+                            if let s = inputs[k] as? String, !s.isEmpty { generic = s; break }
+                        }
+                    }
+                }
+                for sub in d.values { walk(sub) }
+            } else if let a = v as? [Any] {
+                for sub in a { walk(sub) }
+            }
+        }
+        walk(obj)
+        return ckpt ?? unet ?? generic
+    }
+
+    private func cleanWeightName(_ s: String) -> String {
+        let base = (s as NSString).lastPathComponent
+        for ext in [".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"] where base.hasSuffix(ext) {
+            return String(base.dropLast(ext.count))
+        }
+        return base
+    }
+
     // ---------- 四、一次完整采样 ----------
     func refresh() -> ModelSnapshot {
         let now = Date()
@@ -939,16 +986,22 @@ final class LocalModelSampler {
             }
         }
 
-        // 4.4 网关没声明的模型服务进程（自建 llama-server / Ollama 之类）
+        // 4.4 网关没声明的模型服务进程（自建 llama-server / Ollama / ComfyUI 之类）
         for p in procs where !claimed.contains(p.pid) {
             let running = isRunning(p.pid)
             let livePort = p.ports.first { connectable($0) }
-            let state: ModelState
-            let note: String
+            var state: ModelState
+            var note: String
+            var name = p.display
             if let port = livePort {
                 state = running ? .running : .idle
                 note = running ? "pid \(p.pid) · 端口 \(port) · 正在处理请求"
                                : "pid \(p.pid) · 端口 \(port) · 权重在内存、无计算"
+                // ComfyUI 里真正吃显存的是工作流选的权重文件，只写 "ComfyUI" 说不清在跑什么
+                if p.kind == "ComfyUI", let m = comfyModelName(port: port) {
+                    name = "ComfyUI · \(m.name)"
+                    note += m.inQueue ? " · 队列里的任务用的就是它" : " · 最近一次任务用的它（队列空）"
+                }
             } else if p.ports.isEmpty {
                 // 没有服务端口的（Draw Things 这类应用内模型）不是故障，只看有没有在算
                 state = running ? .running : .idle
@@ -957,7 +1010,7 @@ final class LocalModelSampler {
                 state = .failed
                 note = "pid \(p.pid) · 端口 \(p.ports.map(String.init).joined(separator: "/")) 连不上"
             }
-            append(pid: p.pid, name: p.display, mem: p.memBytes, state: state, note: note)
+            append(pid: p.pid, name: name, mem: p.memBytes, state: state, note: note)
         }
 
         // 4.5 排序：内存占用降序（故障但无内存的排最后）
@@ -1043,6 +1096,9 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private var topViews: [(view: NSView, baseY: CGFloat)] = []
     private var belowViews: [(view: NSView, baseY: CGFloat)] = []
     private var appliedShrink: CGFloat = -1
+    /// 建窗时的 frame（含标题栏）—— 每次都用它算目标高度，绝不在当前高度上做增量
+    /// （踩过：行数在 1↔2 之间来回变时，每次 `height -= dy` 会把窗口越削越扁，顶部内容被裁掉）
+    private var baseFrame: NSRect?
 
     private func trackTop(_ v: NSView) { topViews.append((v, v.frame.origin.y)) }
     private func trackBelow(_ v: NSView) { belowViews.append((v, v.frame.origin.y)) }
@@ -1050,7 +1106,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private func applyModelLayout(rowCount: Int) {
         let used = max(1, min(modelRowLimit, rowCount))
         let dy = CGFloat(modelRowLimit - used) * 24
-        guard dy != appliedShrink, let w = window else { return }
+        guard dy != appliedShrink, let w = window, let bf = baseFrame else { return }
         appliedShrink = dy
         for (v, y) in topViews { v.frame.origin.y = y - dy }
         // 下方区（脚注 / 三段榜 / 按钮）不随模型行数移动，显式复位一次，保证窗口缩短后不漂移
@@ -1062,9 +1118,12 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
             modelStateLabels[i].isHidden = hide
             modelMemLabels[i].isHidden = hide
         }
+        // 目标高度 = 基准高度 − 省下的行高；顶边位置保持不动
+        let targetHeight = bf.height - dy
         var f = w.frame
-        f.origin.y += dy
-        f.size.height -= dy
+        let topEdge = f.origin.y + f.height
+        f.size.height = targetHeight
+        f.origin.y = topEdge - targetHeight
         w.setFrame(f, display: true)
     }
 
@@ -1202,6 +1261,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         trackBelow(toggle)
 
         self.window = w
+        baseFrame = w.frame
     }
 
     @objc private func quitApp() { NSApp.terminate(nil) }
