@@ -539,508 +539,6 @@ final class ProcessSampler {
 }
 
 // ============================================================
-// MARK: - 本机 AI 模型（窗口里的「模型」一栏）
-// ============================================================
-//
-// 两路数据各管一件事，缺一不可：
-//   ① 进程侧（libproc）—— 谁真的占着内存、监听哪个端口、有没有在算；
-//   ② 网关侧（127.0.0.1:8010/v1/models）—— 本机声明了哪几个模型、哪些常驻在哪个端口。
-// 只看 ① 会把「配置里有、但没加载」的模型藏掉，也认不出模型名（oMLX 会改写自己的 argv，
-// 进程名只剩 python3.11）；只看 ② 会把崩掉的服务当成正常。所以两边交叉。
-//
-// 状态口径（窗口里逐行显示）：
-//   正在运行 —— 进程在、端口在监听、最近 12 秒内有计算（CPU 或 GPU 时间在涨）
-//   挂载待机 —— 进程在、端口在监听、这段时间没算过东西（权重仍占着内存）
-//   出现故障 —— 声明为常驻却连不上端口；或进程在却不监听任何端口
-//   未加载   —— 网关声明存在但没常驻（不占内存 ⇒ 不进排序，单独一行列出）
-
-enum ModelState {
-    case running, idle, failed, unloaded
-
-    var text: String {
-        switch self {
-        case .running:  return "正在运行"
-        case .idle:     return "挂载待机"
-        case .failed:   return "出现故障"
-        case .unloaded: return "未加载"
-        }
-    }
-
-    var color: NSColor {
-        switch self {
-        case .running:  return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.42, alpha: 1)  // 绿
-        case .idle:     return NSColor(calibratedRed: 0.45, green: 0.66, blue: 0.95, alpha: 1)  // 蓝
-        case .failed:   return NSColor(calibratedRed: 0.95, green: 0.32, blue: 0.28, alpha: 1)  // 红
-        case .unloaded: return .tertiaryLabelColor
-        }
-    }
-}
-
-struct ModelRow {
-    var name: String
-    var memGB: Double
-    var state: ModelState
-    var note: String
-    var pid: pid_t? = nil     // 仅内部用：判定「一个进程托管多个模型 ⇒ 内存是合计」
-    var shared: Bool = false
-}
-
-struct ModelSnapshot {
-    var rows: [ModelRow] = []
-    var unloaded: [String] = []
-    var gatewayUp = false
-    var hiddenRows = 0
-}
-
-/// 网关 /v1/models 里声明的一条
-private struct GatewayModel {
-    var id: String
-    var port: Int
-    var resident: Bool
-}
-
-/// 扫描到的模型服务进程
-private struct ModelProc {
-    var pid: pid_t
-    var kind: String
-    var display: String
-    var memBytes: UInt64
-    var cpuNs: UInt64
-    var ports: [Int]
-}
-
-final class LocalModelSampler {
-    /// 本地模型网关端口（--gateway= 可覆盖，验收时用来喂假声明）
-    var gatewayPort = 8010
-    private let activeWindow: TimeInterval = 12     // 最近多少秒算过东西 ⇒ 正在运行
-    private let activeThreshold: TimeInterval = 0.03 // 2 秒窗口内 30 ms 计算量即算"在算"
-
-    private var prevCPU: [pid_t: UInt64] = [:]
-    private var prevGPU: [pid_t: Int] = [:]
-    private var prevAt = Date()
-    private var lastActive: [pid_t: Date] = [:]
-
-    // ---------- 一、进程识别 ----------
-    /// (关键字, 归属) —— 顺序敏感：先命中先算
-    /// 语言模型服务在前，生图/视频引擎在后（关键词越具体的越靠前，否则 "comfy" 会被别的路径抢走）
-    private let kindHints: [(String, String)] = [
-        ("omlx", "oMLX"),
-        ("llama-server", "llama.cpp"), ("llama_server", "llama.cpp"), ("llama.cpp", "llama.cpp"),
-        ("mlx_lm.server", "MLX"), ("mlx_vlm.server", "MLX"), ("mlx-lm", "MLX"), ("mlx_vlm", "MLX"),
-        ("ollama", "Ollama"),
-        ("lmstudio", "LM Studio"), ("lm studio", "LM Studio"),
-        ("vllm", "vLLM"), ("sglang", "SGLang"),
-        // 生图 / 视频 / 换脸引擎
-        ("comfyui", "ComfyUI"), ("comfy", "ComfyUI"),
-        ("draw things", "Draw Things"), ("drawthings", "Draw Things"), ("draw-things", "Draw Things"),
-        ("mflux", "mflux"),
-        ("fooocus", "Fooocus"), ("invokeai", "InvokeAI"), ("invoke-ai", "InvokeAI"),
-        ("stable-diffusion.cpp", "sd.cpp"), ("sd-server", "sd.cpp"), ("sd-cli", "sd.cpp"),
-        ("stable-diffusion-webui", "A1111"), ("webui.py", "A1111"),
-        ("diffusers", "Diffusers"),
-        ("qwen-image", "Qwen-Image"), ("qwen_image", "Qwen-Image"),
-        ("flux", "Flux"),
-    ]
-    /// 先按进程名/路径快速筛，避免对 780 个进程挨个 sysctl 读 argv
-    private let quickHints = ["omlx", "llama", "mlx", "ollama", "lmstudio", "lm studio", "vllm", "sglang",
-                              "comfy", "draw things", "drawthings", "mflux", "fooocus", "invokeai",
-                              "stable-diffusion", "sd-server", "diffusers", "qwen-image", "qwen_image"]
-    private let interpreters = ["python", "python3", "node", "ruby", "java", "uv", "uvicorn"]
-
-    /// 已知的推理服务端口 → 引擎名。用于「解释器进程 + 端口对得上」这种认不出模型名的场景
-    /// （ComfyUI 就是这样：进程叫 Python，argv 只有 main.py --port 8188）。
-    private let portEngines: [Int: String] = [
-        8188: "ComfyUI",
-        7860: "Draw Things / A1111",
-        7861: "A1111",
-        8189: "ComfyUI",
-        8888: "Fooocus",
-        9090: "InvokeAI",
-    ]
-
-    private func classify(name: String, path: String, argv: [String]) -> String? {
-        let head = argv.first ?? ""
-        let hay = (name + " " + path + " " + head).lowercased()
-        for (k, v) in kindHints where hay.contains(k) { return v }
-        return nil
-    }
-
-    /// 模型名：优先 argv 里的 --model / -m 等；不够再退回「归属 + 端口」
-    private func modelDisplay(argv: [String], kind: String) -> String {
-        let flags = ["--model", "-m", "--model-path", "--model-dir", "--hf-repo", "--model-id", "--repo-id"]
-        for (i, a) in argv.enumerated() {
-            if flags.contains(a), i + 1 < argv.count, !argv[i + 1].hasPrefix("-") {
-                let base = (argv[i + 1] as NSString).lastPathComponent
-                if !base.isEmpty { return base }
-            }
-            for f in flags where a.hasPrefix(f + "=") {
-                let base = (String(a.dropFirst(f.count + 1)) as NSString).lastPathComponent
-                if !base.isEmpty { return base }
-            }
-        }
-        for a in argv where a.hasSuffix(".gguf") {
-            return ((a as NSString).lastPathComponent as NSString).deletingPathExtension
-        }
-        return kind
-    }
-
-    // ---------- 二、进程数据 ----------
-    private func argvOf(_ pid: pid_t) -> [String] {
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
-        var buf = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return [] }
-        var argc: Int32 = 0
-        memcpy(&argc, buf, 4)
-        var idx = 4
-        while idx < size && buf[idx] != 0 { idx += 1 }   // 跳过可执行路径
-        while idx < size && buf[idx] == 0 { idx += 1 }   // 跳过填充
-        var out: [String] = []
-        var n: Int32 = 0
-        while n < argc && idx < size {
-            var end = idx
-            while end < size && buf[end] != 0 { end += 1 }
-            out.append(String(decoding: buf[idx..<end], as: UTF8.self))
-            n += 1
-            idx = end + 1
-        }
-        return out
-    }
-
-    private func rusageOf(_ pid: pid_t) -> (mem: UInt64, cpuNs: UInt64)? {
-        var info = rusage_info_current()
-        let kr = withUnsafeMutablePointer(to: &info) { p -> Int32 in
-            p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rp in
-                proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, rp)
-            }
-        }
-        guard kr == 0 else { return nil }
-        return (info.ri_phys_footprint, info.ri_user_time + info.ri_system_time)
-    }
-
-    /// 该进程处于 LISTEN 状态的 TCP 端口。
-    /// 坑：macOS 27 内核的 struct socket_info 比 SDK 头文件大 24 字节（792 vs 768），
-    /// 直接 cast 成 Swift 结构体会整体错位（读出的 soi_kind 是垃圾值）；
-    /// 这里按「返回字节数 − 结构体大小」做偏移补偿，并用 soi_kind / soi_family 双重校验。
-    private func listeningPorts(_ pid: pid_t) -> [Int] {
-        let maxFD = 2048
-        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: maxFD)
-        let sz = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds,
-                              Int32(maxFD * MemoryLayout<proc_fdinfo>.stride))
-        guard sz > 0 else { return [] }
-        let n = Int(sz) / MemoryLayout<proc_fdinfo>.stride
-        var ports: [Int] = []
-        for i in 0..<n {
-            guard fds[i].proc_fdtype == 2 else { continue }   // PROX_FDTYPE_SOCKET
-            var buf = [UInt8](repeating: 0, count: 2048)
-            let r = buf.withUnsafeMutableBytes { raw -> Int32 in
-                proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO,
-                               raw.baseAddress, Int32(raw.count))
-            }
-            guard r > 0 else { continue }
-            let shift = Int(r) - MemoryLayout<socket_info>.stride
-            guard shift >= 0, shift <= 64 else { continue }
-
-            func i32(_ off: Int) -> Int32 {
-                let o = off + shift
-                guard o >= 0, o + 4 <= buf.count else { return 0 }
-                var v: Int32 = 0
-                withUnsafeMutableBytes(of: &v) { dst in
-                    buf.withUnsafeBytes { src in
-                        dst.copyBytes(from: UnsafeRawBufferPointer(rebasing: src[o..<o + 4]))
-                    }
-                }
-                return v
-            }
-
-            guard i32(232) == 2,      // soi_kind == SOCKINFO_TCP
-                  i32(160) == AF_INET || i32(160) == AF_INET6 else { continue }   // soi_family
-            guard i32(320) == 1 else { continue }   // pri_tcp.tcpsi_state == TCPS_LISTEN
-            // pri_in.insi_lport（网络字节序，存低 16 位）
-            let raw = UInt16(truncatingIfNeeded: i32(244))
-            ports.append(Int(raw.bigEndian))
-        }
-        return ports
-    }
-
-    // ---------- 三、端口探活 / 网关读取（原始 socket，不走系统代理）----------
-    private func connectable(_ port: Int) -> Bool {
-        guard port > 0, port < 65536 else { return false }
-        let s = socket(AF_INET, SOCK_STREAM, 0)
-        guard s >= 0 else { return false }
-        defer { close(s) }
-        var tv = timeval(tv_sec: 0, tv_usec: 300_000)
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let r = withUnsafePointer(to: &addr) { p in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                connect(s, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        return r == 0
-    }
-
-    private func httpBody(port: Int, path: String) -> String? {
-        let s = socket(AF_INET, SOCK_STREAM, 0)
-        guard s >= 0 else { return nil }
-        defer { close(s) }
-        var tv = timeval(tv_sec: 0, tv_usec: 600_000)
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let cr = withUnsafePointer(to: &addr) { p in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                connect(s, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard cr == 0 else { return nil }
-        let req = "GET \(path) HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n\r\n"
-        _ = req.withCString { write(s, $0, strlen($0)) }
-        var data = Data()
-        var buf = [UInt8](repeating: 0, count: 8192)
-        while true {
-            let n = read(s, &buf, buf.count)
-            if n <= 0 { break }
-            data.append(contentsOf: buf[0..<n])
-            if data.count > 1024 * 1024 { break }
-        }
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        guard let r = text.range(of: "\r\n\r\n") else { return nil }
-        return String(text[r.upperBound...])
-    }
-
-    private func gatewayModels() -> [GatewayModel]? {
-        guard let body = httpBody(port: gatewayPort, path: "/v1/models"),
-              let data = body.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arr = obj["data"] as? [[String: Any]] else { return nil }
-        var out: [GatewayModel] = []
-        for m in arr {
-            guard let id = m["id"] as? String else { continue }
-            let local = m["local"] as? [String: Any] ?? [:]
-            out.append(GatewayModel(id: id,
-                                    port: (local["port"] as? Int) ?? 0,
-                                    resident: (local["resident"] as? Bool) ?? false))
-        }
-        return out.isEmpty ? nil : out
-    }
-
-    // ---------- ComfyUI：抓出它正在跑的工作流用的权重文件 ----------
-    /// ComfyUI 没有「当前加载了什么模型」的接口，但 `/queue`（正在跑的任务）与
-    /// `/history`（最近一次任务）里的工作流节点都带着 `ckpt_name` / `unet_name`。
-    /// 先队列、后历史 —— 队列里有就说明此刻在跑它，否则只代表「最近跑过」。
-    private func comfyModelName(port: Int) -> (name: String, inQueue: Bool)? {
-        for (path, inQueue) in [("/queue", true), ("/history?max_items=1", false)] {
-            guard let body = httpBody(port: port, path: path),
-                  let data = body.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) else { continue }
-            if let raw = firstWeightName(obj) { return (cleanWeightName(raw), inQueue) }
-        }
-        return nil
-    }
-
-    /// 深度遍历工作流节点，优先 ckpt / unet，其次通用 model 字段（LoRA、VAE 名不作为主模型）
-    private func firstWeightName(_ obj: Any) -> String? {
-        var ckpt: String?
-        var unet: String?
-        var generic: String?
-        func walk(_ v: Any) {
-            if let d = v as? [String: Any] {
-                if let inputs = d["inputs"] as? [String: Any] {
-                    if ckpt == nil, let s = inputs["ckpt_name"] as? String, !s.isEmpty { ckpt = s }
-                    if unet == nil, let s = inputs["unet_name"] as? String, !s.isEmpty { unet = s }
-                    if generic == nil {
-                        for k in ["diffusion_model", "model_name", "gguf_name"] {
-                            if let s = inputs[k] as? String, !s.isEmpty { generic = s; break }
-                        }
-                    }
-                }
-                for sub in d.values { walk(sub) }
-            } else if let a = v as? [Any] {
-                for sub in a { walk(sub) }
-            }
-        }
-        walk(obj)
-        return ckpt ?? unet ?? generic
-    }
-
-    private func cleanWeightName(_ s: String) -> String {
-        let base = (s as NSString).lastPathComponent
-        for ext in [".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"] where base.hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
-        return base
-    }
-
-    // ---------- 四、一次完整采样 ----------
-    func refresh() -> ModelSnapshot {
-        let now = Date()
-        var snap = ModelSnapshot()
-
-        // 4.1 扫进程
-        var procs: [ModelProc] = []
-        var pids = [pid_t](repeating: 0, count: 8192)
-        let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids,
-                                  Int32(pids.count * MemoryLayout<pid_t>.stride))
-        let count = max(0, Int(bytes) / MemoryLayout<pid_t>.stride)
-        let selfPid = getpid()
-        for i in 0..<count {
-            let pid = pids[i]
-            guard pid > 0, pid != selfPid else { continue }
-            var nameBuf = [CChar](repeating: 0, count: 1024)
-            let nlen = proc_name(pid, &nameBuf, 1024)
-            let pname = nlen > 0 ? String(cString: nameBuf) : ""
-            var pathBuf = [CChar](repeating: 0, count: 4096)
-            _ = proc_pidpath(pid, &pathBuf, 4096)
-            let ppath = String(cString: pathBuf)
-
-            let quick = (pname + " " + ppath).lowercased()
-            let suspicious = quickHints.contains { quick.contains($0) }
-                || interpreters.contains { pname.lowercased().hasPrefix($0) }
-            guard suspicious else { continue }
-
-            let argv = argvOf(pid)
-            var kind = classify(name: pname, path: ppath, argv: argv)
-            let ports = listeningPorts(pid)
-            if kind == nil,
-               let engine = ports.compactMap({ portEngines[$0] }).first,
-               interpreters.contains(where: { pname.lowercased().hasPrefix($0) }) {
-                kind = engine        // 认不出名字、但端口对得上已知引擎（ComfyUI 就是这种）
-            }
-            guard let kind = kind else { continue }
-            guard let ru = rusageOf(pid) else { continue }
-            // 有监听端口的服务不设内存门槛（权重可能 mmap/在子进程里，主进程本身可能只有几十 MB）；
-            // 没有端口的（GUI 应用 / 库）要求真占着内存，避免把客户端壳子也算进来
-            if ports.isEmpty && ru.mem < 300 * 1024 * 1024 { continue }
-            procs.append(ModelProc(pid: pid, kind: kind,
-                                   display: modelDisplay(argv: argv, kind: kind),
-                                   memBytes: ru.mem, cpuNs: ru.cpuNs,
-                                   ports: ports))
-        }
-
-        // 4.2 活动判定（CPU 或 GPU 时间在涨 ⇒ 正在算）
-        let gpu = readGPUClientTimes()?.byPid ?? [:]
-        var activeNow: Set<pid_t> = []
-        for p in procs {
-            let g = gpu[p.pid]?.t ?? 0
-            defer { prevCPU[p.pid] = p.cpuNs; prevGPU[p.pid] = g }
-            guard let oldCPU = prevCPU[p.pid] else { continue }   // 首拍只建基准
-            let oldGPU = prevGPU[p.pid] ?? g
-            let dCPU = Double(p.cpuNs >= oldCPU ? p.cpuNs - oldCPU : 0) / 1_000_000_000
-            let dGPU = Double(max(0, g - oldGPU)) / 1_000_000_000
-            if dCPU >= activeThreshold || dGPU >= activeThreshold { activeNow.insert(p.pid) }
-        }
-        for pid in activeNow { lastActive[pid] = now }
-        // 清掉已经消失的进程的记录（先取快照再改，别边遍历边写字典）
-        let alive = Set(procs.map { $0.pid })
-        for pid in lastActive.keys.filter({ !alive.contains($0) }) { lastActive[pid] = nil }
-        for pid in Set(prevCPU.keys).subtracting(alive) { prevCPU[pid] = nil; prevGPU[pid] = nil }
-
-        func isRunning(_ pid: pid_t) -> Bool {
-            guard let t = lastActive[pid] else { return false }
-            return now.timeIntervalSince(t) <= activeWindow
-        }
-
-        // 4.3 合并网关声明
-        let declared = gatewayModels()
-        snap.gatewayUp = declared != nil
-        var claimed: Set<pid_t> = []
-        var pidUse: [pid_t: Int] = [:]
-
-        func append(pid: pid_t?, name: String, mem: UInt64, state: ModelState, note: String) {
-            if let p = pid { pidUse[p, default: 0] += 1 }
-            snap.rows.append(ModelRow(name: name, memGB: Double(mem) / 1_073_741_824,
-                                      state: state, note: note, pid: pid))
-        }
-
-        if let list = declared {
-            for m in list {
-                if !m.resident {
-                    snap.unloaded.append("\(m.id)（端口 \(m.port)）")
-                    continue
-                }
-                let up = connectable(m.port)
-                let holder = procs.first { $0.ports.contains(m.port) }
-                if let h = holder, up {
-                    claimed.insert(h.pid)
-                    let running = isRunning(h.pid)
-                    append(pid: h.pid, name: m.id, mem: h.memBytes,
-                           state: running ? .running : .idle,
-                           note: running
-                                ? "pid \(h.pid) · 端口 \(m.port) · 正在处理请求"
-                                : "pid \(h.pid) · 端口 \(m.port) · 权重在内存、无计算")
-                } else if up {
-                    append(pid: nil, name: m.id, mem: 0, state: .idle,
-                           note: "端口 \(m.port) 在监听，占用进程未识别")
-                } else {
-                    append(pid: nil, name: m.id, mem: 0, state: .failed,
-                           note: "常驻但端口 \(m.port) 连不上")
-                }
-            }
-        }
-
-        // 4.4 网关没声明的模型服务进程（自建 llama-server / Ollama / ComfyUI 之类）
-        // 引擎重启 / 互斥切换的过渡态：同一引擎已有一个实例在端口上服务，
-        // 另一个还没有端口 ⇒ 把它的内存并到服务中的那一行，不重复列。
-        var orphanMem: [pid_t: (bytes: UInt64, count: Int)] = [:]
-        for p in procs where !claimed.contains(p.pid) {
-            if p.ports.isEmpty,
-               let sib = procs.first(where: { $0.pid != p.pid && $0.kind == p.kind && !$0.ports.isEmpty }) {
-                let cur = orphanMem[sib.pid] ?? (0, 0)
-                orphanMem[sib.pid] = (cur.bytes + p.memBytes, cur.count + 1)
-                continue
-            }
-            let running = isRunning(p.pid)
-            let livePort = p.ports.first { connectable($0) }
-            var state: ModelState
-            var note: String
-            var name = p.display
-            if let port = livePort {
-                state = running ? .running : .idle
-                note = running ? "pid \(p.pid) · 端口 \(port) · 正在处理请求"
-                               : "pid \(p.pid) · 端口 \(port) · 权重在内存、无计算"
-                // ComfyUI 里真正吃显存的是工作流选的权重文件，只写 "ComfyUI" 说不清在跑什么
-                if p.kind == "ComfyUI", let m = comfyModelName(port: port) {
-                    name = "ComfyUI · \(m.name)"
-                    note += m.inQueue ? " · 队列里的任务用的就是它" : " · 最近一次任务用的它（队列空）"
-                }
-            } else if p.ports.isEmpty {
-                // 没有服务端口的（Draw Things 这类应用内模型）不是故障，只看有没有在算
-                state = running ? .running : .idle
-                note = "pid \(p.pid) · 应用内模型，无服务端口"
-            } else {
-                state = .failed
-                note = "pid \(p.pid) · 端口 \(p.ports.map(String.init).joined(separator: "/")) 连不上"
-            }
-            append(pid: p.pid, name: name, mem: p.memBytes, state: state, note: note)
-        }
-
-        // 4.5 排序：内存占用降序（故障但无内存的排最后）
-        // 退出中的旧实例内存并到在服务的那个模型上：不丢账，也不重复占一行
-        for (pid, extra) in orphanMem {
-            guard let idx = snap.rows.firstIndex(where: { $0.pid == pid }) else { continue }
-            snap.rows[idx].memGB += Double(extra.bytes) / 1_073_741_824
-            snap.rows[idx].note += "（另含 \(extra.count) 个退出中的旧实例内存）"
-        }
-        snap.rows.sort { $0.memGB > $1.memGB }
-        // 一个进程托管多个模型时无法把内存拆开 ⇒ 逐行标 *，不假装知道各占多少
-        for i in snap.rows.indices {
-            if let p = snap.rows[i].pid, (pidUse[p] ?? 0) > 1 { snap.rows[i].shared = true }
-        }
-
-        prevAt = now
-        return snap
-    }
-}
-
-// ============================================================
 // MARK: - 进程榜窗口（点 Dock 图标 / 菜单打开）
 // ============================================================
 
@@ -1054,9 +552,12 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private var swapLabel: NSTextField?
     private var nameLabels: [NSTextField] = []
     private var valueLabels: [NSTextField] = []
-    private var toggleMenuBar: NSButton?
-    // 本机 AI 模型一栏
-    private let modelSampler = LocalModelSampler()
+    private var dockCheckbox: NSButton?
+    private var menuCheckbox: NSButton?
+    // 本机 AI 引擎一栏
+    private let modelSampler = EngineWatcher()
+    private let engineQueue = DispatchQueue(label: "com.tanfang.dockstats.engines", qos: .utility)
+    private var engineProbeBusy = false
     private let modelRowLimit = 4
     private var modelNameLabels: [NSTextField] = []
     private var modelStateLabels: [NSTextField] = []
@@ -1267,13 +768,21 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         content.addSubview(quit)
         trackBelow(quit)
 
-        let toggle = NSButton(title: "菜单栏读数", target: self, action: #selector(toggleMenuBarItem(_:)))
-        toggle.bezelStyle = .rounded
-        toggle.setButtonType(.pushOnPushOff)
-        toggle.frame = NSRect(x: 24, y: 24, width: 110, height: 28)
-        content.addSubview(toggle)
-        toggleMenuBar = toggle
-        trackBelow(toggle)
+        // 两个显示面各自开关（默认 Dock 开、菜单栏关），选择会被记住
+        let dockBox = NSButton(checkboxWithTitle: "Dock 图标读数", target: self,
+                               action: #selector(toggleDockCheckbox(_:)))
+        dockBox.frame = NSRect(x: 24, y: 26, width: 130, height: 20)
+        content.addSubview(dockBox)
+        dockCheckbox = dockBox
+        trackBelow(dockBox)
+
+        let menuBox = NSButton(checkboxWithTitle: "菜单栏读数", target: self,
+                               action: #selector(toggleMenuBarCheckbox(_:)))
+        menuBox.frame = NSRect(x: 160, y: 26, width: 120, height: 20)
+        content.addSubview(menuBox)
+        menuCheckbox = menuBox
+        trackBelow(menuBox)
+        syncToggleStates()
 
         self.window = w
         baseFrame = w.frame
@@ -1281,12 +790,43 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
 
     @objc private func quitApp() { NSApp.terminate(nil) }
 
-    @objc private func toggleMenuBarItem(_ sender: NSButton) {
+    @objc private func toggleMenuBarCheckbox(_ sender: NSButton) {
         (NSApp.delegate as? AppDelegate)?.setMenuBarVisible(sender.state == .on)
+        syncToggleStates()
+    }
+
+    @objc private func toggleDockCheckbox(_ sender: NSButton) {
+        (NSApp.delegate as? AppDelegate)?.setDockVisible(sender.state == .on)
+        syncToggleStates()
+    }
+
+    /// 勾选状态跟着实际状态走（菜单栏菜单里改过也要同步回窗口）
+    private func syncToggleStates() {
+        guard let d = NSApp.delegate as? AppDelegate else { return }
+        dockCheckbox?.state = d.dockIconVisible ? .on : .off
+        menuCheckbox?.state = d.menuBarVisible ? .on : .off
+    }
+
+    /// 4 秒一次把引擎探测丢到后台；探测期间 UI 继续显示上一次的结果
+    private func triggerEngineProbeIfNeeded() {
+        guard !engineProbeBusy else { return }
+        guard cachedModels == nil || Date().timeIntervalSince(modelSampledAt) >= 4 else { return }
+        engineProbeBusy = true
+        engineQueue.async { [weak self] in
+            guard let self = self else { return }
+            let snap = self.modelSampler.refresh()
+            DispatchQueue.main.async {
+                self.cachedModels = snap
+                self.modelSampledAt = Date()
+                self.engineProbeBusy = false
+                self.refresh()          // 用新缓存重画（refresh 只在主线程跑）
+            }
+        }
     }
 
     func refresh() {
         guard window != nil else { return }
+        syncToggleStates()
 
         if let s = sampleProvider?() {
             let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
@@ -1308,16 +848,10 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
             }
         }
 
-        // 本机 AI 模型（内存里挂着的本地模型 + 运行状态）
-        // 模型状态不需要 2 秒粒度：4 秒一采，省掉一半 ioreg / 全进程扫描开销。
-        let models: ModelSnapshot
-        if let c = cachedModels, Date().timeIntervalSince(modelSampledAt) < 4 {
-            models = c
-        } else {
-            models = modelSampler.refresh()
-            cachedModels = models
-            modelSampledAt = Date()
-        }
+        // 本机 AI 引擎一栏：探测丢后台（15 个端口 × 各家 API 试探可能耗时），
+        // 主线程只渲染缓存结果 —— 绝不卡窗口。
+        triggerEngineProbeIfNeeded()
+        let models = cachedModels ?? ModelSnapshot()
         applyModelLayout(rowCount: models.rows.count)
         for i in 0..<modelRowLimit {
             guard i < modelNameLabels.count else { continue }
@@ -1344,7 +878,9 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
             }
         }
         var footParts: [String] = []
-        if !models.gatewayUp { footParts.append("本地网关 8010 无响应，只列已加载进程") }
+        if models.enginesFound == 0 && models.rows.isEmpty {
+            footParts.append("没探测到本地引擎")
+        }
         if !models.unloaded.isEmpty { footParts.append("未加载：" + models.unloaded.joined(separator: "、")) }
         if models.rows.count > modelRowLimit { footParts.append("另有 \(models.rows.count - modelRowLimit) 个未显示") }
         if models.rows.contains(where: { $0.shared }) { footParts.append("* 同一进程托管多个模型，内存是进程合计") }
@@ -1392,7 +928,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var animator: Timer?
     private var lastIcon: NSImage?
-    private var showDockIcon = true
+    private var showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true
+    private var showMenuBar = UserDefaults.standard.bool(forKey: "showMenuBar")
     private var target = Sample()
     private var display = Sample()
     private var lastDrawn = Sample(cpu: -1, gpu: -1, memPct: -1, memUsedGB: 0, memTotalGB: 0)
@@ -1405,7 +942,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         gpuSampler.prime()
 
         buildMenu()
-        status.item.isVisible = false          // 菜单栏读数默认隐藏
+        status.item.isVisible = showMenuBar     // 菜单栏读数：默认关，选择会记住
 
         // 首次采样：内存立刻有值，CPU 与 GPU 需要两拍才有增量
         let m0 = memSampler.next()
@@ -1433,14 +970,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         let menu = NSMenu()
 
-        let dockswitch = NSMenuItem(title: "在 Dock 显示读数", action: #selector(toggleDock(_:)), keyEquivalent: "")
+        let dockswitch = NSMenuItem(title: "在 Dock 图标显示读数", action: #selector(toggleDock(_:)), keyEquivalent: "")
         dockswitch.state = showDockIcon ? .on : .off
         dockswitch.target = self
+        dockswitch.tag = 101
         menu.addItem(dockswitch)
 
-        let winswitch = NSMenuItem(title: "显示菜单栏读数", action: #selector(toggleMenuBarItem(_:)), keyEquivalent: "")
-        winswitch.state = .off
+        let winswitch = NSMenuItem(title: "在菜单栏显示读数", action: #selector(toggleMenuBarItem(_:)), keyEquivalent: "")
+        winswitch.state = showMenuBar ? .on : .off
         winswitch.target = self
+        winswitch.tag = 102
         menu.addItem(winswitch)
 
         let openItem = NSMenuItem(title: "打开进程排行窗口", action: #selector(openProcWindow(_:)), keyEquivalent: "d")
@@ -1533,9 +1072,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleDock(_ sender: NSMenuItem) {
-        showDockIcon.toggle()
+        setDockVisible(!showDockIcon)
         sender.state = showDockIcon ? .on : .off
-        if showDockIcon { tick() }
     }
 
     @objc private func openProcWindow(_ sender: Any?) {
@@ -1543,13 +1081,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleMenuBarItem(_ sender: NSMenuItem) {
-        let on = !status.item.isVisible
-        setMenuBarVisible(on)
-        sender.state = on ? .on : .off
+        setMenuBarVisible(!showMenuBar)
+        sender.state = showMenuBar ? .on : .off
     }
 
-    /// 菜单栏读数开关（窗口里的按钮也走这里）
+    // ---- 两个显示面都可以单独开关，选择记进 UserDefaults（下次启动沿用）----
+    var dockIconVisible: Bool { showDockIcon }
+    var menuBarVisible: Bool { showMenuBar }
+
+    /// Dock 图标读数开关。关掉后图标恢复系统默认外观
+    func setDockVisible(_ visible: Bool) {
+        showDockIcon = visible
+        UserDefaults.standard.set(visible, forKey: "showDockIcon")
+        if visible {
+            tick()
+            lastDrawn = Sample(cpu: -1, gpu: -1, memPct: -1, memUsedGB: 0, memTotalGB: 0)
+        } else {
+            NSApplication.shared.applicationIconImage = nil
+        }
+    }
+
+    /// 菜单栏读数开关（窗口里的勾选框与状态栏菜单都走这里）
     func setMenuBarVisible(_ visible: Bool) {
+        showMenuBar = visible
+        UserDefaults.standard.set(visible, forKey: "showMenuBar")
         status.item.isVisible = visible
         if visible { status.update(display) }
     }
@@ -1594,29 +1149,30 @@ if CommandLine.arguments.contains("--procs") {
     exit(0)
 }
 
-// ---- 自检模式：--models 打印「本机 AI 模型」一栏的数据源（无 GUI 时验证用）----
-if CommandLine.arguments.contains("--models") {
-    let ms = LocalModelSampler()
-    if let g = CommandLine.arguments.first(where: { $0.hasPrefix("--gateway=") }),
-       let p = Int(g.replacingOccurrences(of: "--gateway=", with: "")) {
-        ms.gatewayPort = p
+// ---- 自检模式：--engines 打印「本机 AI 引擎」一栏的数据源（无 GUI 时验证用）----
+// --ports=9000,9001 追加探测端口；--models 是旧名，保留兼容
+if CommandLine.arguments.contains("--engines") || CommandLine.arguments.contains("--models") {
+    let ms = EngineWatcher()
+    if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--ports=") }) {
+        ms.extraPorts = a.replacingOccurrences(of: "--ports=", with: "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
     _ = ms.refresh()                        // 首拍只建基准
     Thread.sleep(forTimeInterval: 2.0)      // 跨过一个活动窗口
     let snap = ms.refresh()
-    print("网关 \(ms.gatewayPort)：\(snap.gatewayUp ? "在线" : "无响应")")
+    print("探测端口：\(snap.scannedPorts.map(String.init).joined(separator: " "))")
+    print("活着的引擎：\(snap.enginesFound) 个")
     print("=== 本机 AI 模型（按内存占用排序）===")
-    if snap.rows.isEmpty { print("  （未发现本地模型进程）") }
+    if snap.rows.isEmpty { print("  （没探测到本地模型）") }
     for r in snap.rows {
         let star = r.shared ? " *" : ""
         let mem = r.memGB > 0.01 ? String(format: "%.2f GB", r.memGB) : "—"
         print("  \(r.name)\(star)　\(r.state.text)　\(mem)　｜　\(r.note)")
     }
     if !snap.unloaded.isEmpty {
-        print("=== 未加载 ===")
+        print("=== 已下载未加载 ===")
         for u in snap.unloaded { print("  \(u)") }
     }
-    if !snap.gatewayUp { print("（网关 \(ms.gatewayPort) 无响应：只列已加载的进程，无法判断哪个模型该常驻）") }
     exit(0)
 }
 
