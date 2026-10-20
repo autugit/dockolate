@@ -190,12 +190,12 @@ final class EngineWatcher {
     var apiKeys: [Int: String] = [:]
     private var configLoaded = false
 
-    /// 读 ~/Library/Application Support/DockStats/engines.json：
+    /// 读 ~/Library/Application Support/Dockolate/engines.json：
     /// { "extraPorts": [9000], "apiKeys": { "8000": "sk-..." } }
     private func loadConfigIfNeeded() {
         guard !configLoaded else { return }
         configLoaded = true
-        let path = NSHomeDirectory() + "/Library/Application Support/DockStats/engines.json"
+        let path = NSHomeDirectory() + "/Library/Application Support/Dockolate/engines.json"
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return }
         if let ports = obj["extraPorts"] as? [Int] { extraPorts.append(contentsOf: ports) }
