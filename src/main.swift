@@ -450,11 +450,37 @@ final class ProcessSampler {
         psTop(n, sortFlag: "-r", valueKey: "pcpu")           // -r: 按 CPU 降序
     }
 
+    /// 内存占用：phys_footprint（活动监视器同款口径），走 libproc 而非 ps。
+    /// 为什么不用 ps 的 rss：实测对 mmap 大户会少报一个数量级
+    /// （Python 进程真实 23 GB，ps rss 只报 0.97 GB；python3.11 真实 18 GB，ps 几乎不显示）。
     func topMemory(_ n: Int = 3) -> [ProcStat] {
-        // rss 单位 KB → bytes
-        psTop(n, sortFlag: "-m", valueKey: "rss").map {
-            ProcStat(pid: $0.pid, name: $0.name, value: $0.value * 1024)
+        var pids = [pid_t](repeating: 0, count: 8192)
+        let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids,
+                                  Int32(pids.count * MemoryLayout<pid_t>.stride))
+        let count = Int(bytes) / MemoryLayout<pid_t>.stride
+        guard count > 0 else { return [] }
+
+        var rows: [ProcStat] = []
+        rows.reserveCapacity(count)
+        for i in 0..<count {
+            let pid = pids[i]
+            guard pid > 0 else { continue }
+            var info = rusage_info_current()
+            let kr = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rp in
+                    proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, rp)
+                }
+            }
+            guard kr == 0 else { continue }
+            let fp = info.ri_phys_footprint
+            guard fp > 0 else { continue }
+            var nameBuf = [CChar](repeating: 0, count: 1024)
+            let nameLen = proc_name(pid, &nameBuf, 1024)
+            let nm = nameLen > 0 ? String(cString: nameBuf) : "pid \(pid)"
+            rows.append(ProcStat(pid: pid, name: nm, value: Double(fp)))
         }
+        rows.sort { $0.value > $1.value }
+        return Array(rows.prefix(n))
     }
 
     // ---------- GPU：AGXDeviceUserClient 的 accumulatedGPUTime 增量 ----------
@@ -630,7 +656,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         for i in 0..<3 { row(y: 330 - CGFloat(i) * 25, into: content) }
         section("GPU 占用最高", top: 246, into: content)
         for i in 0..<3 { row(y: 220 - CGFloat(i) * 25, into: content) }
-        section("内存占用最高（常驻 RSS，不含内核/压缩）", top: 136, into: content)
+        section("内存占用最高（物理占用，含共享页）", top: 136, into: content)
         for i in 0..<3 { row(y: 110 - CGFloat(i) * 25, into: content) }
 
         // 底部按钮
@@ -661,17 +687,20 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         if let s = sampleProvider?() {
             let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
             summaryLabel?.stringValue = String(
-                format: "CPU %.0f%%　·　GPU %@　·　内存 %.1f / %.0f GB（%.0f%%）　·　Z 压缩+换页 %.0f%%",
-                s.cpu, gpu, s.memUsedGB, s.memTotalGB, s.memPct, s.memPressurePct)
+                format: "CPU %.0f%%　·　GPU %@　·　内存 %.0f%%（%.1f / %.0f GB）",
+                s.cpu, gpu, s.memPct, s.memUsedGB, s.memTotalGB)
             breakdownLabel?.stringValue = String(
                 format: "内存去向：应用 %.1f + 内核联动 %.1f + 压缩 %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
                 s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memCachedGB, s.memFreeGB)
 
             let sw = sampler.swapUsage()
             if sw.totalGB > 0.01 {
-                swapLabel?.stringValue = String(format: "已换页（swap）：%.1f GB / 上限 %.1f GB", sw.usedGB, sw.totalGB)
+                swapLabel?.stringValue = String(
+                    format: "Z 压缩+换页 %.0f%%　｜　已换页 %.1f / 上限 %.1f GB",
+                    s.memPressurePct, sw.usedGB, sw.totalGB)
             } else {
-                swapLabel?.stringValue = "已换页（swap）：未使用"
+                swapLabel?.stringValue = String(format: "Z 压缩+换页 %.0f%%　｜　未使用换页",
+                                                s.memPressurePct)
             }
         }
 
@@ -912,7 +941,7 @@ if CommandLine.arguments.contains("--procs") {
     print("=== GPU 占用最高（% of one GPU）===")
     if gpu.isEmpty { print("  (首拍无基准)") }
     for s in gpu { print(String(format: "  %-32s %6.1f%%  (pid %d)", (s.name as NSString).utf8String!, s.value, s.pid)) }
-    print("=== 内存占用最高（常驻 RSS）===")
+    print("=== 内存占用最高（物理占用 phys_footprint，含共享页）===")
     for s in mem { print(String(format: "  %-32s %6.2f GB  (pid %d)", (s.name as NSString).utf8String!, s.value / 1_073_741_824, s.pid)) }
     let sw = sampler.swapUsage()
     print(String(format: "=== 换页 swap：%.1f / %.1f GB ===", sw.usedGB, sw.totalGB))

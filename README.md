@@ -67,7 +67,7 @@ $BIN --procs                                  # 打印三个进程榜（窗口�
 | Z 压缩+换页 | `sysctl vm.swapusage` + 压缩器页数 | (压缩内存 + 已换页) / 总物理内存 |
 | 进程 CPU | `ps -r` 按 `%CPU` 降序 | 取前三 |
 | 进程 GPU | `ioreg -c AGXDeviceUserClient` → `AppUsage.accumulatedGPUTime` 差 | 该客户端累计 GPU 时间（ns）增量 ÷ 墙钟 = 占整颗 GPU 的百分比 |
-| 进程内存 | `ps -m` 按 `RSS` 降序 | 常驻内存实际占用 |
+| 进程内存 | `proc_pid_rusage` → `ri_phys_footprint`（libproc） | 物理占用，与活动监视器同口径（**别用 `ps` 的 rss，对 mmap 大户会少报 23 倍**） |
 
 > 进程 GPU 是这套工具的硬货：macOS 不提供公开的按进程 GPU 统计（`powermetrics` 要 root），
 > 这里靠 IOKit 的 `AGXDeviceUserClient` 拿到，实测与设备总利用率吻合（压测进程 87.4% vs 设备 85–89%）。
