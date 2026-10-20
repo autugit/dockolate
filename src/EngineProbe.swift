@@ -204,12 +204,12 @@ final class EngineWatcher {
         }
     }
 
-    /// 鉴权头：配置里的 key > 环境变量 DOCKSTATS_KEY_<端口> > DOCKSTATS_KEY
+    /// 鉴权头：配置里的 key > 环境变量 DOCKOLATE_KEY_<端口> > DOCKOLATE_KEY
     private func authHeaders(_ port: Int) -> [String: String] {
         if let k = apiKeys[port], !k.isEmpty { return ["Authorization": "Bearer \(k)"] }
         let env = ProcessInfo.processInfo.environment
-        if let k = env["DOCKSTATS_KEY_\(port)"], !k.isEmpty { return ["Authorization": "Bearer \(k)"] }
-        if let k = env["DOCKSTATS_KEY"], !k.isEmpty { return ["Authorization": "Bearer \(k)"] }
+        if let k = env["DOCKOLATE_KEY_\(port)"], !k.isEmpty { return ["Authorization": "Bearer \(k)"] }
+        if let k = env["DOCKOLATE_KEY"], !k.isEmpty { return ["Authorization": "Bearer \(k)"] }
         return [:]
     }
 
