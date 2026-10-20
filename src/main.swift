@@ -988,6 +988,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let about = NSMenuItem(title: "关于 Dockolate", action: #selector(showAbout(_:)), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
         let quit = NSMenuItem(title: "退出 Dockolate", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -1078,6 +1082,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openProcWindow(_ sender: Any?) {
         procWindow.show()
+    }
+
+    /// 关于：署名与版本（自检模式不弹）
+    @objc private func showAbout(_ sender: Any?) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let alert = NSAlert()
+        alert.messageText = "Dockolate \(version)"
+        alert.informativeText = """
+        Dock 里的一板巧克力 —— CPU / GPU / 内存水位，外加本机 AI 模型清单。
+
+        作者：Autumemory · Hermes · DeepSeek v4.1 flash
+        许可：MIT
+        https://github.com/autugit/dockolate
+        """
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func toggleMenuBarItem(_ sender: NSMenuItem) {

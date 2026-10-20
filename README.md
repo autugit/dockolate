@@ -1,5 +1,11 @@
 # Dockolate
 
+[![Release](https://img.shields.io/github/v/release/autugit/dockolate?display_name=tag)](https://github.com/autugit/dockolate/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/autugit/dockolate)](LICENSE)
+[![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](https://github.com/autugit/dockolate)
+[![Stars](https://img.shields.io/github/stars/autugit/dockolate)](https://github.com/autugit/dockolate/stargazers)
+[![Language](https://img.shields.io/github/languages/top/autugit/dockolate)](https://github.com/autugit/dockolate)
+
 **A chocolate bar in your Dock — water-level gauge for CPU / GPU / memory, plus a live inventory of the local AI models actually loaded in RAM.**
 
 <p align="center">
@@ -161,6 +167,11 @@ No root, no private entitlements, no telemetry, no network access beyond
 ## Privacy
 
 Everything is read locally. Nothing is transmitted, collected or logged.
+
+## Authors
+
+Built by **Autumemory** together with **Hermes** (agent) and **DeepSeek v4.1 flash** (model).
+The design decisions, the code, the measurements and these documents came out of that collaboration.
 
 ## License
 
