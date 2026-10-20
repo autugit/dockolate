@@ -1,6 +1,6 @@
-# DockStats
+# Dockolate
 
-**A macOS system monitor that lives in your Dock icon — water-level gauge for CPU / GPU / memory, plus a live inventory of the local AI models actually loaded in RAM.**
+**A chocolate bar in your Dock — water-level gauge for CPU / GPU / memory, plus a live inventory of the local AI models actually loaded in RAM.**
 
 No Electron. No dependencies. One `swiftc` invocation. ~2% CPU, ~96 MB RSS.
 
@@ -42,20 +42,20 @@ Three things here are uncommon in existing tools:
 ## Install
 
 ```bash
-git clone <this repo> DockStats && cd DockStats
+git clone <this repo> Dockolate && cd Dockolate
 ./install.sh          # build → ~/Applications → LaunchAgent (login item + auto-restart)
 ```
 
 Uninstall: `./uninstall.sh`
 
-Build only (no install): `./build.sh` → `build/DockStats.app`
+Build only (no install): `./build.sh` → `build/Dockolate.app`
 
 Requires macOS 13+ and the Xcode command line tools. The build targets Apple
 Silicon; for Intel change `-target arm64-apple-macosx13.0` in `build.sh` to
 `x86_64-apple-macosx13.0`.
 
 The app is ad-hoc signed, not notarized — the first launch needs
-right-click → Open, or `xattr -d com.apple.quarantine /path/to/DockStats.app`.
+right-click → Open, or `xattr -d com.apple.quarantine /path/to/Dockolate.app`.
 
 ## Two display surfaces, each optional
 
@@ -103,7 +103,7 @@ RSS can under-report by an order of magnitude for mmap-heavy models
 ## Configuration (optional)
 
 Zero config works. To reach engines elsewhere or behind an API key, create
-`~/Library/Application Support/DockStats/engines.json`:
+`~/Library/Application Support/Dockolate/engines.json`:
 
 ```json
 {
@@ -113,17 +113,17 @@ Zero config works. To reach engines elsewhere or behind an API key, create
 ```
 
 Keys may also come from the environment: `DOCKSTATS_KEY_<port>`, or a global
-`DOCKSTATS_KEY`. Engines that require auth answer 401 without a key — DockStats
+`DOCKSTATS_KEY`. Engines that require auth answer 401 without a key — Dockolate
 then shows the engine name and port instead of a model name, and never guesses.
 
 ## Diagnostics (no GUI, no screen-recording permission)
 
 ```bash
-./build/DockStats.app/Contents/MacOS/DockStats --dump --out=/tmp   # one sample + icon PNG
-./build/DockStats.app/Contents/MacOS/DockStats --dump --mock=8,16,35,88 --out=/tmp
-./build/DockStats.app/Contents/MacOS/DockStats --procs             # top-3 process lists
-./build/DockStats.app/Contents/MacOS/DockStats --engines           # engine probe report
-./build/DockStats.app/Contents/MacOS/DockStats --engines --ports=9000,9001
+./build/Dockolate.app/Contents/MacOS/Dockolate --dump --out=/tmp   # one sample + icon PNG
+./build/Dockolate.app/Contents/MacOS/Dockolate --dump --mock=8,16,35,88 --out=/tmp
+./build/Dockolate.app/Contents/MacOS/Dockolate --procs             # top-3 process lists
+./build/Dockolate.app/Contents/MacOS/Dockolate --engines           # engine probe report
+./build/Dockolate.app/Contents/MacOS/Dockolate --engines --ports=9000,9001
 ```
 
 ## How it works

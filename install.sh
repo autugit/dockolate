@@ -1,10 +1,10 @@
 #!/bin/bash
-# 部署 DockStats：编译 → 装到 ~/Applications → 注册 LaunchAgent（登录自启 + 崩溃自拉起）
+# 部署 Dockolate：编译 → 装到 ~/Applications → 注册 LaunchAgent（登录自启 + 崩溃自拉起）
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="DockStats"
-LABEL="com.tanfang.dockstats"
+APP_NAME="Dockolate"
+LABEL="com.dockolate.app"
 SRC_APP="build/$APP_NAME.app"
 DST_APP="$HOME/Applications/$APP_NAME.app"
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -52,9 +52,9 @@ cat > "$AGENT" <<PLIST
     <key>LimitLoadToSessionType</key>
     <string>Aqua</string>
     <key>StandardOutPath</key>
-    <string>$HOME/Library/Logs/DockStats.out.log</string>
+    <string>$HOME/Library/Logs/Dockolate.out.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/Library/Logs/DockStats.err.log</string>
+    <string>$HOME/Library/Logs/Dockolate.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -69,5 +69,5 @@ launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -E "^\s*(state|pid|prog
 echo "==> 进程"
 pgrep -lx "$APP_NAME" | sed 's/^/    /' || echo "    (未运行)"
 echo
-echo "完成。Dock 里应已出现 DockStats 图标；菜单栏右侧有 C/G/M 读数。"
+echo "完成。Dock 里应已出现 Dockolate 图标；菜单栏右侧有 C/G/M 读数。"
 echo "卸载：launchctl bootout gui/$(id -u)/$LABEL && rm -rf $DST_APP $AGENT"
