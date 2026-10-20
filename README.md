@@ -85,18 +85,24 @@ same letter-number pairing as the Dock cells.
 
 ## Supported local engines
 
-| Engine | Default port | How the model name is obtained |
-|---|---|---|
-| Ollama | 11434 | `GET /api/ps` (running) + `GET /api/tags` (downloaded → "not loaded" list) |
-| LM Studio | 1234 | `GET /api/v0/models`, `state == "loaded"` |
-| llama.cpp `llama-server` | 8080 / 8081 / 8082 | `GET /v1/models`, `--model` argv fallback |
-| vLLM / MLX / oMLX | 8000 / 8001 | `GET /v1/models` |
-| ComfyUI | 8188 / 8189 | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
-| A1111 / Forge / Draw Things | 7860 / 7861 | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
-| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | 8888 / 9090 / 5001 / 5000 | `GET /v1/models` |
-| In-app models (Draw Things, LM Studio desktop) | — | process fingerprint + `phys_footprint` |
+**Ports are discovered, not assumed.** Dockolate first looks at which ports the
+identified model processes actually listen on, so a server you moved to a custom
+port is still found. A small built-in default table is only a fallback for the
+case where a process cannot be identified; anything else can be declared in
+`engines.json`. Nothing in the list below is a requirement.
 
-Anything listening on a port you add is probed the same way.
+| Engine | How the model name is obtained |
+|---|---|
+| Ollama | `GET /api/ps` (running) + `GET /api/tags` (downloaded → "not loaded" list) |
+| LM Studio | `GET /api/v0/models`, `state == "loaded"` |
+| llama.cpp `llama-server` | `GET /v1/models`, `--model` argv fallback |
+| vLLM / MLX / oMLX | `GET /v1/models` |
+| ComfyUI | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
+| A1111 / Forge / Draw Things | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
+| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | `GET /v1/models` |
+| In-app models (Draw Things, LM Studio desktop) | process fingerprint + `phys_footprint` |
+
+Any OpenAI-compatible server on a port you declare is probed the same way.
 
 ### Status meanings
 
@@ -118,8 +124,8 @@ Zero config works. To reach engines elsewhere or behind an API key, create
 
 ```json
 {
-  "extraPorts": [9000, 9001],
-  "apiKeys": { "8000": "sk-your-key" }
+  "extraPorts": [12345],
+  "apiKeys": { "12345": "sk-your-key" }
 }
 ```
 
