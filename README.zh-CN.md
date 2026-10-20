@@ -1,5 +1,10 @@
 # Dockolate
 
+[![Release](https://img.shields.io/github/v/release/autugit/dockolate?display_name=tag)](https://github.com/autugit/dockolate/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/autugit/dockolate)](LICENSE)
+[![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](https://github.com/autugit/dockolate)
+[![Stars](https://img.shields.io/github/stars/autugit/dockolate)](https://github.com/autugit/dockolate/stargazers)
+
 **Dock 里的一板巧克力** —— 用四格水位实时显示 CPU / GPU / 内存压力，外加一份「内存里现在真挂着哪些本地 AI 模型」的清单。
 
 <p align="center">
@@ -125,3 +130,12 @@ $BIN --procs                                  # 打印三个进程榜（窗口�
 实测自身开销约 **0.7% CPU / 93 MB**。
 
 详见 `docs/开发文档.md`。
+
+## 作者
+
+由 **Autumemory** 与 **Hermes**（agent）、**DeepSeek v4.1 flash**（模型）共同完成。
+设计取舍、代码、实测数据与这些文档都出自这次协作。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
