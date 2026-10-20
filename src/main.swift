@@ -1,4 +1,4 @@
-// DockStats — 在 Dock 图标与菜单栏实时显示 CPU / GPU / 内存占用率
+// Dockolate — 在 Dock 图标与菜单栏实时显示 CPU / GPU / 内存占用率
 // 采样全部走本机公开接口：host_processor_info / host_statistics64 / ioreg(IOAccelerator)
 // 无第三方依赖，无 root 需求。
 
@@ -556,7 +556,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private var menuCheckbox: NSButton?
     // 本机 AI 引擎一栏
     private let modelSampler = EngineWatcher()
-    private let engineQueue = DispatchQueue(label: "com.tanfang.dockstats.engines", qos: .utility)
+    private let engineQueue = DispatchQueue(label: "com.dockolate.app.engines", qos: .utility)
     private var engineProbeBusy = false
     private let modelRowLimit = 4
     private var modelNameLabels: [NSTextField] = []
@@ -697,7 +697,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
                          styleMask: [.titled, .closable, .miniaturizable],
                          backing: .buffered, defer: false)
-        w.title = "DockStats"
+        w.title = "Dockolate"
         w.isReleasedWhenClosed = false
         w.delegate = self
         w.center()
@@ -762,7 +762,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         for i in 0..<3 { row(y: 126 - CGFloat(i) * 25, into: content) }
 
         // 底部按钮
-        let quit = NSButton(title: "退出 DockStats", target: self, action: #selector(quitApp))
+        let quit = NSButton(title: "退出 Dockolate", target: self, action: #selector(quitApp))
         quit.bezelStyle = .rounded
         quit.frame = NSRect(x: 326, y: 24, width: 110, height: 28)
         content.addSubview(quit)
@@ -988,7 +988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "退出 DockStats", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出 Dockolate", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
@@ -1244,7 +1244,7 @@ if CommandLine.arguments.contains("--dump") {
 // 自检模式（--dump/--models/--procs）带参数，不参与这个判断。
 if CommandLine.arguments.count <= 1 {
     let me = ProcessInfo.processInfo.processIdentifier
-    let bundleID = Bundle.main.bundleIdentifier ?? "com.tanfang.dockstats"
+    let bundleID = Bundle.main.bundleIdentifier ?? "com.dockolate.app"
     let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         .filter { $0.processIdentifier != me }
     if let first = others.min(by: { $0.processIdentifier < $1.processIdentifier }),

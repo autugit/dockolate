@@ -1,6 +1,7 @@
-# DockStats
+# Dockolate
 
-在 macOS Dock 图标上用**水位**实时显示 CPU / GPU / 内存 / 内存压力，无需打开任何窗口。
+**Dock 里的一板巧克力** —— 用四格水位实时显示 CPU / GPU / 内存压力，外加一份「内存里现在真挂着哪些本地 AI 模型」的清单。
+
 
 图标是 2×2 四宫格，每格一个字母水印 + 从底部升起的水位，高低和颜色一眼看出紧迫程度：
 
@@ -58,7 +59,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 **未加载** = 已下载未常驻（只有 Ollama / LM Studio 提供这个信息），单独列出、不占内存。
 
 需要鉴权的引擎（比如 oMLX 无 key 一律 401）拿不到模型名时只显示引擎名 + 端口，不猜。
-配置 `~/Library/Application Support/DockStats/engines.json`：
+配置 `~/Library/Application Support/Dockolate/engines.json`：
 
 ```json
 { "extraPorts": [9000], "apiKeys": { "8000": "sk-your-key" } }
@@ -72,7 +73,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 ./install.sh
 ```
 
-会编译、装到 `~/Applications/DockStats.app`，并注册 LaunchAgent（登录自启 + 崩溃 4 秒内自拉起）。
+会编译、装到 `~/Applications/Dockolate.app`，并注册 LaunchAgent（登录自启 + 崩溃 4 秒内自拉起）。
 
 ## 卸载
 
@@ -83,13 +84,13 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 ## 只编译不安装
 
 ```bash
-./build.sh          # 产物：build/DockStats.app
+./build.sh          # 产物：build/Dockolate.app
 ```
 
 ## 自检 / 验收（无需屏幕录制权限）
 
 ```bash
-BIN=./build/DockStats.app/Contents/MacOS/DockStats
+BIN=./build/Dockolate.app/Contents/MacOS/Dockolate
 
 $BIN --dump --out=/tmp                        # 采样一次并导出图标 PNG
 $BIN --dump --verbose --out=/tmp              # 附带内存去向与 Z 的分解

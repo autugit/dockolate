@@ -1,12 +1,12 @@
 #!/bin/bash
-# 编译 DockStats 并组装 .app bundle
+# 编译 Dockolate 并组装 .app bundle
 # 用法：./build.sh [--install]   （--install 会部署到 ~/Applications）
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-APP_NAME="DockStats"
-BUNDLE_ID="com.tanfang.dockstats"
+APP_NAME="Dockolate"
+BUNDLE_ID="com.dockolate.app"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 
