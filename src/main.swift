@@ -21,6 +21,8 @@ struct Sample {
     var memCompressedGB: Double = 0   // 压缩器占用
     var memCachedGB: Double = 0       // 文件缓存（可回收，不计入已用）
     var memFreeGB: Double = 0
+    var memPressurePct: Double = 0    // (压缩 + 换页) ÷ 物理内存 —— 内存真正紧张的程度
+    var swapUsedGB: Double = 0
 }
 
 // ============================================================
@@ -241,108 +243,83 @@ func gpuName() -> String {
 
 func levelColor(_ pct: Double) -> NSColor {
     switch pct {
-    case ..<50:  return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.42, alpha: 1)  // 绿
-    case ..<80:  return NSColor(calibratedRed: 0.98, green: 0.75, blue: 0.20, alpha: 1)  // 黄
-    default:     return NSColor(calibratedRed: 0.95, green: 0.32, blue: 0.28, alpha: 1)  // 红
+    case ..<20:  return NSColor(calibratedRed: 0.32, green: 0.62, blue: 0.98, alpha: 1)  // 蓝 · 极低
+    case ..<50:  return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.42, alpha: 1)  // 绿 · 低
+    case ..<80:  return NSColor(calibratedRed: 0.98, green: 0.75, blue: 0.20, alpha: 1)  // 黄 · 中
+    default:     return NSColor(calibratedRed: 0.95, green: 0.32, blue: 0.28, alpha: 1)  // 红 · 高
     }
+}
+
+// ============================================================
+// MARK: - 换页量（sysctl vm.swapusage，C 接口，非子进程）
+// ============================================================
+
+struct XswUsage {
+    var total: UInt64 = 0
+    var avail: UInt64 = 0
+    var used: UInt64 = 0
+    var pagesize: UInt32 = 0
+    var encrypted: UInt8 = 0
+}
+
+func swapUsedGB() -> Double {
+    var u = XswUsage()
+    var size = MemoryLayout<XswUsage>.stride
+    guard sysctlbyname("vm.swapusage", &u, &size, nil, 0) == 0 else { return 0 }
+    return Double(u.used) / 1_073_741_824
 }
 
 // ============================================================
 // MARK: - Dock 图标绘制
 // ============================================================
 
-func pctNumber(_ v: Double) -> String { String(format: "%.0f", v) }
+/// 水位格：底部往上填充，颜色随水位分级；大号字母水印压在最上层（白，任何水位下都清晰）
+func drawWaterCell(_ r: NSRect, letter: String, pct: Double, color: NSColor) {
+    let radius: CGFloat = 19
+    let box = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
 
-/// 格子里画：淡底 → 大号半透明水印字母（压在数字后面）→ 居中大数字（可带前缀）→ 底部细进度条
-/// - watermark: 上排 C / G，作为背景大字
-/// - prefix:    下排 "M"，作为数字前缀
-func drawCell(_ r: NSRect,
-              watermark: String? = nil,
-              prefix: String? = nil,
-              number: String,
-              pct: Double,
-              color: NSColor,
-              maxFontSize: CGFloat) {
-
-    let box = NSBezierPath(roundedRect: r, xRadius: 19, yRadius: 19)
-    color.withAlphaComponent(0.13).setFill()
+    // 槽底（未被填充的部分）
+    NSColor(calibratedWhite: 0.15, alpha: 1.0).setFill()
     box.fill()
-    color.withAlphaComponent(0.45).setStroke()
-    box.lineWidth = 1.5
-    box.stroke()
 
-    // 水印大字（裁到格子内，半透明，压在大数字后面）
-    if let wm = watermark {
+    // 水位：从下往上，裁到格子圆角内
+    let frac = CGFloat(min(100, max(0, pct)) / 100.0)
+    if frac > 0.002 {
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect: r, xRadius: 19, yRadius: 19).addClip()
-        let wAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: r.height * 1.0, weight: .black),
-            .foregroundColor: color.withAlphaComponent(0.20),
-        ]
-        let ws = (wm as NSString).size(withAttributes: wAttrs)
-        (wm as NSString).draw(at: NSPoint(x: r.midX - ws.width / 2, y: r.midY - ws.height / 2),
-                              withAttributes: wAttrs)
+        box.addClip()
+        let h = r.height * frac
+        let water = NSRect(x: r.minX, y: r.minY, width: r.width, height: h)
+        color.withAlphaComponent(0.92).setFill()
+        NSBezierPath(rect: water).fill()
+        // 水面高光：一条细亮线，让"水位"有刻度感
+        NSColor(calibratedWhite: 1.0, alpha: 0.35).setFill()
+        NSBezierPath(rect: NSRect(x: r.minX, y: r.minY + h - 1.5,
+                                  width: r.width, height: 1.5)).fill()
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    // 底部细进度条
-    let barH: CGFloat = 7
-    let barPad: CGFloat = 10
-    let trackRect = NSRect(x: r.minX + barPad, y: r.minY + 8,
-                           width: r.width - barPad * 2, height: barH)
-    let track = NSBezierPath(roundedRect: trackRect, xRadius: barH / 2, yRadius: barH / 2)
-    NSColor(calibratedWhite: 1.0, alpha: 0.15).setFill()
-    track.fill()
-    let frac = CGFloat(min(100, max(0, pct)) / 100)
-    if frac > 0.001 {
-        let w = max(barH, trackRect.width * frac)
-        let f = NSBezierPath(roundedRect: NSRect(x: trackRect.minX, y: trackRect.minY,
-                                                 width: w, height: barH),
-                             xRadius: barH / 2, yRadius: barH / 2)
-        color.setFill()
-        f.fill()
-    }
+    // 大号字母水印：白，压在水位之上，永远可辨
+    NSGraphicsContext.saveGraphicsState()
+    box.addClip()
+    // 白字 + 极淡暗描边：水位是彩色时纯白字会"糊"进底色，描边把它钉住
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: r.height * 0.92, weight: .black),
+        .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.56),
+        .strokeColor: NSColor(calibratedWhite: 0.0, alpha: 0.40),
+        .strokeWidth: -2.5,
+    ]
+    let sz = (letter as NSString).size(withAttributes: attrs)
+    (letter as NSString).draw(at: NSPoint(x: r.midX - sz.width / 2, y: r.midY - sz.height / 2),
+                              withAttributes: attrs)
+    NSGraphicsContext.restoreGraphicsState()
 
-    // 大号数字：宽、高双重约束下取最大字号，保证「100%」不溢出
-    let maxW = r.width - 12
-    let maxH = r.height - barH - 16
-
-    func build(_ size: CGFloat) -> (NSMutableAttributedString, CGFloat, CGFloat) {
-        let m = NSMutableAttributedString()
-        if let p = prefix {
-            m.append(NSAttributedString(string: p + " ", attributes: [
-                .font: NSFont.systemFont(ofSize: size * 0.62, weight: .black),
-                .foregroundColor: color.withAlphaComponent(0.58),
-            ]))
-        }
-        m.append(NSAttributedString(string: number, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .heavy),
-            .foregroundColor: color,
-        ]))
-        m.append(NSAttributedString(string: "%", attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: size * 0.40, weight: .bold),
-            .foregroundColor: color.withAlphaComponent(0.85),
-        ]))
-        let sz = m.size()
-        return (m, sz.width, sz.height)
-    }
-
-    var size = maxFontSize
-    var (att, w, h) = build(size)
-    var guardCount = 0
-    while (w > maxW || h > maxH) && size > 9 && guardCount < 40 {
-        let k = min(maxW / max(w, 1), maxH / max(h, 1))
-        size *= (k < 1 ? max(k * 0.98, 0.5) : 0.9)
-        (att, w, h) = build(size)
-        guardCount += 1
-    }
-
-    let bandBot = r.minY + barH + 16
-    let y = (r.maxY + bandBot) / 2 - h / 2
-    att.draw(at: NSPoint(x: r.midX - w / 2, y: y))
+    // 描边
+    color.withAlphaComponent(0.65).setStroke()
+    box.lineWidth = 2
+    box.stroke()
 }
 
-// MARK: Dock 图标（256×256：上二下一 · 大号数字 · C/G 水印 M 前缀）
+// MARK: Dock 图标（256×256 四宫格：左上 C · 右上 G · 左下 Z · 右下 M）
 func makeDockIcon(_ s: Sample) -> NSImage {
     let side: CGFloat = 256
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -358,26 +335,28 @@ func makeDockIcon(_ s: Sample) -> NSImage {
         let inner = side - margin * 2
         let cellW = (inner - gap) / 2
         let cellH = cellW
+        let leftX = margin
+        let rightX = margin + cellW + gap
         let topY = side - margin - cellH
         let botY = margin
 
-        let cpuRect = NSRect(x: margin, y: topY, width: cellW, height: cellH)
-        let gpuRect = NSRect(x: margin + cellW + gap, y: topY, width: cellW, height: cellH)
-        let memRect = NSRect(x: margin, y: botY, width: inner, height: cellH)
+        // 左上 CPU
+        drawWaterCell(NSRect(x: leftX, y: topY, width: cellW, height: cellH),
+                      letter: "C", pct: s.cpu, color: levelColor(s.cpu))
 
-        drawCell(cpuRect, watermark: "C", number: pctNumber(s.cpu),
-                 pct: s.cpu, color: levelColor(s.cpu), maxFontSize: 80)
+        // 右上 GPU（读不到时灰色空水位）
+        let g = s.gpu
+        drawWaterCell(NSRect(x: rightX, y: topY, width: cellW, height: cellH),
+                      letter: "G", pct: g ?? 0,
+                      color: g == nil ? NSColor(calibratedWhite: 0.45, alpha: 1) : levelColor(g!))
 
-        if let g = s.gpu {
-            drawCell(gpuRect, watermark: "G", number: pctNumber(g),
-                     pct: g, color: levelColor(g), maxFontSize: 80)
-        } else {
-            drawCell(gpuRect, watermark: "G", number: "—", pct: 0,
-                     color: NSColor(calibratedWhite: 0.50, alpha: 1), maxFontSize: 80)
-        }
+        // 左下 Z：内存压缩 + 换页
+        drawWaterCell(NSRect(x: leftX, y: botY, width: cellW, height: cellH),
+                      letter: "Z", pct: s.memPressurePct, color: levelColor(s.memPressurePct))
 
-        drawCell(memRect, prefix: "M", number: pctNumber(s.memPct),
-                 pct: s.memPct, color: levelColor(s.memPct), maxFontSize: 96)
+        // 右下 M：内存占用
+        drawWaterCell(NSRect(x: rightX, y: botY, width: cellW, height: cellH),
+                      letter: "M", pct: s.memPct, color: levelColor(s.memPct))
 
         return true
     }
@@ -681,8 +660,9 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
 
         if let s = sampleProvider?() {
             let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
-            summaryLabel?.stringValue = String(format: "CPU %.0f%%　·　GPU %@　·　内存 %.1f / %.0f GB（%.0f%%）",
-                                               s.cpu, gpu, s.memUsedGB, s.memTotalGB, s.memPct)
+            summaryLabel?.stringValue = String(
+                format: "CPU %.0f%%　·　GPU %@　·　内存 %.1f / %.0f GB（%.0f%%）　·　Z 压缩+换页 %.0f%%",
+                s.cpu, gpu, s.memUsedGB, s.memTotalGB, s.memPct, s.memPressurePct)
             breakdownLabel?.stringValue = String(
                 format: "内存去向：应用 %.1f + 内核联动 %.1f + 压缩 %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
                 s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memCachedGB, s.memFreeGB)
@@ -755,7 +735,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 首次采样：内存立刻有值，CPU 与 GPU 需要两拍才有增量
         let m0 = memSampler.next()
         target.memPct = m0.pct; target.memUsedGB = m0.usedGB; target.memTotalGB = m0.totalGB
+        let d0 = memSampler.last
+        let sw0 = swapUsedGB()
+        target.swapUsedGB = sw0
+        target.memPressurePct = d0.totalGB > 0
+            ? min(100, (d0.compressedGB + sw0) / d0.totalGB * 100) : 0
         display.memPct = m0.pct; display.memUsedGB = m0.usedGB; display.memTotalGB = m0.totalGB
+        display.memPressurePct = target.memPressurePct
         _ = cpuSampler.next()
 
         // 采样 1 秒一次
@@ -808,6 +794,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         target.memCompressedGB = d.compressedGB
         target.memCachedGB = d.cachedGB
         target.memFreeGB = d.freeGB
+        // 内存压力水位 = (被压缩 + 被换出) ÷ 物理内存总量
+        // 含义：系统为了腾地方，把多大比例的物理内存压起来或挪到磁盘了
+        let swapGB = swapUsedGB()
+        target.swapUsedGB = swapGB
+        target.memPressurePct = d.totalGB > 0
+            ? min(100, (d.compressedGB + swapGB) / d.totalGB * 100) : 0
         if let g = gpuSampler.next() { target.gpu = g }
     }
 
@@ -817,6 +809,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var s = Sample()
         s.cpu = display.cpu + (target.cpu - display.cpu) * k
         s.memPct = display.memPct + (target.memPct - display.memPct) * k
+        s.memPressurePct = display.memPressurePct
+            + (target.memPressurePct - display.memPressurePct) * k
         s.memUsedGB = target.memUsedGB
         s.memTotalGB = target.memTotalGB
         s.memAppGB = target.memAppGB
@@ -824,6 +818,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         s.memCompressedGB = target.memCompressedGB
         s.memCachedGB = target.memCachedGB
         s.memFreeGB = target.memFreeGB
+        s.swapUsedGB = target.swapUsedGB
+        if abs(s.memPressurePct - target.memPressurePct) < 0.2 {
+            s.memPressurePct = target.memPressurePct
+        }
         if let tg = target.gpu {
             let cur = display.gpu ?? tg
             s.gpu = cur + (tg - cur) * k
@@ -847,6 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let moved = round(s.cpu) != round(lastDrawn.cpu)
                 || round(s.memPct) != round(lastDrawn.memPct)
+                || round(s.memPressurePct) != round(lastDrawn.memPressurePct)
                 || gpuChanged
                 || lastDrawn.cpu < 0
             if moved {
@@ -946,14 +945,17 @@ if CommandLine.arguments.contains("--dump") {
     let d = memS.last
     s.memAppGB = d.appGB; s.memWiredGB = d.wiredGB; s.memCompressedGB = d.compressedGB
     s.memCachedGB = d.cachedGB; s.memFreeGB = d.freeGB
+    s.swapUsedGB = swapUsedGB()
+    s.memPressurePct = d.totalGB > 0 ? min(100, (d.compressedGB + s.swapUsedGB) / d.totalGB * 100) : 0
 
     // --mock=CPU,GPU,MEM：强制指定显示数值，用于验收边界态（如 100/100/100）
     if let mock = CommandLine.arguments.first(where: { $0.hasPrefix("--mock=") }) {
         let parts = mock.replacingOccurrences(of: "--mock=", with: "")
             .split(separator: ",").compactMap { Double($0) }
-        if parts.count == 3 {
+        if parts.count >= 3 {
             s.cpu = parts[0]; s.gpu = parts[1]; s.memPct = parts[2]
         }
+        if parts.count >= 4 { s.memPressurePct = parts[3] }
     }
 
     print(String(format: "cpu=%.1f gpu=%@ mem=%.1f%% (%.1f/%.0f GB) chip=%@",
@@ -964,6 +966,8 @@ if CommandLine.arguments.contains("--dump") {
         print(String(format: "  mem: 应用 %.1f + 联动 %.1f + 压缩 %.1f = %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
                      s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memUsedGB,
                      s.memCachedGB, s.memFreeGB))
+        print(String(format: "  Z(压缩+换页水位): (%.1f 压缩 + %.1f 换页) / %.0f = %.1f%%",
+                     s.memCompressedGB, s.swapUsedGB, s.memTotalGB, s.memPressurePct))
     }
 
     let icon = makeDockIcon(s)
