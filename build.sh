@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Dockolate"
-BUNDLE_ID="com.dockolate.app"
+BUNDLE_ID="io.github.autugit.dockolate"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 

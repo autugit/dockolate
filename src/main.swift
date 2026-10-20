@@ -556,7 +556,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
     private var menuCheckbox: NSButton?
     // 本机 AI 引擎一栏
     private let modelSampler = EngineWatcher()
-    private let engineQueue = DispatchQueue(label: "com.dockolate.app.engines", qos: .utility)
+    private let engineQueue = DispatchQueue(label: "io.github.autugit.dockolate.engines", qos: .utility)
     private var engineProbeBusy = false
     private let modelRowLimit = 4
     private var modelNameLabels: [NSTextField] = []
@@ -1244,7 +1244,7 @@ if CommandLine.arguments.contains("--dump") {
 // 自检模式（--dump/--models/--procs）带参数，不参与这个判断。
 if CommandLine.arguments.count <= 1 {
     let me = ProcessInfo.processInfo.processIdentifier
-    let bundleID = Bundle.main.bundleIdentifier ?? "com.dockolate.app"
+    let bundleID = Bundle.main.bundleIdentifier ?? "io.github.autugit.dockolate"
     let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         .filter { $0.processIdentifier != me }
     if let first = others.min(by: { $0.processIdentifier < $1.processIdentifier }),
