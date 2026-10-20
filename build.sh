@@ -14,11 +14,11 @@ echo "==> 清理"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-echo "==> 编译（swiftc -O，Swift 5 语言模式）"
+echo "==> 编译（swiftc -O，Swift 5 语言模式，多文件）"
 swiftc -O -swift-version 5 \
   -target arm64-apple-macosx13.0 \
   -framework Cocoa \
-  src/main.swift \
+  src/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
 echo "==> 写 Info.plist"
