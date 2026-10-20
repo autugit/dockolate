@@ -47,7 +47,7 @@ Three things here are uncommon in existing tools:
 ## Install
 
 ```bash
-git clone <this repo> Dockolate && cd Dockolate
+git clone https://github.com/autugit/dockolate.git && cd dockolate
 ./install.sh          # build → ~/Applications → LaunchAgent (login item + auto-restart)
 ```
 
