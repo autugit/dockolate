@@ -987,7 +987,16 @@ final class LocalModelSampler {
         }
 
         // 4.4 网关没声明的模型服务进程（自建 llama-server / Ollama / ComfyUI 之类）
+        // 引擎重启 / 互斥切换的过渡态：同一引擎已有一个实例在端口上服务，
+        // 另一个还没有端口 ⇒ 把它的内存并到服务中的那一行，不重复列。
+        var orphanMem: [pid_t: (bytes: UInt64, count: Int)] = [:]
         for p in procs where !claimed.contains(p.pid) {
+            if p.ports.isEmpty,
+               let sib = procs.first(where: { $0.pid != p.pid && $0.kind == p.kind && !$0.ports.isEmpty }) {
+                let cur = orphanMem[sib.pid] ?? (0, 0)
+                orphanMem[sib.pid] = (cur.bytes + p.memBytes, cur.count + 1)
+                continue
+            }
             let running = isRunning(p.pid)
             let livePort = p.ports.first { connectable($0) }
             var state: ModelState
@@ -1014,6 +1023,12 @@ final class LocalModelSampler {
         }
 
         // 4.5 排序：内存占用降序（故障但无内存的排最后）
+        // 退出中的旧实例内存并到在服务的那个模型上：不丢账，也不重复占一行
+        for (pid, extra) in orphanMem {
+            guard let idx = snap.rows.firstIndex(where: { $0.pid == pid }) else { continue }
+            snap.rows[idx].memGB += Double(extra.bytes) / 1_073_741_824
+            snap.rows[idx].note += "（另含 \(extra.count) 个退出中的旧实例内存）"
+        }
         snap.rows.sort { $0.memGB > $1.memGB }
         // 一个进程托管多个模型时无法把内存拆开 ⇒ 逐行标 *，不假装知道各占多少
         for i in snap.rows.indices {
