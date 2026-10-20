@@ -2,6 +2,12 @@
 
 **Dock 里的一板巧克力** —— 用四格水位实时显示 CPU / GPU / 内存压力，外加一份「内存里现在真挂着哪些本地 AI 模型」的清单。
 
+<p align="center">
+  <img src="docs/img/dock-icon.png" width="140" alt="Dock 图标：四格水位 C / G / M / Z">
+  <img src="docs/img/window.png" width="440" alt="窗口：本机 AI 模型、进程榜、内存分解">
+</p>
+
+
 
 图标是 2×2 四宫格，每格一个字母水印 + 从底部升起的水位，高低和颜色一眼看出紧迫程度：
 
@@ -65,7 +71,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 { "extraPorts": [9000], "apiKeys": { "8000": "sk-your-key" } }
 ```
 
-也支持环境变量 `DOCKSTATS_KEY_<端口>` 或 `DOCKSTATS_KEY`。
+也支持环境变量 `DOCKOLATE_KEY_<端口>` 或 `DOCKOLATE_KEY`。
 
 ## 安装
 
