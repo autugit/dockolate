@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Dockolate"
-LABEL="com.dockolate.app"
+LABEL="io.github.autugit.dockolate"
 SRC_APP="build/$APP_NAME.app"
 DST_APP="$HOME/Applications/$APP_NAME.app"
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
