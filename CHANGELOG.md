@@ -61,8 +61,13 @@ servers speaking the real protocols (see *Verification* at the end).
   offset with the returned size as the shift, plus a family/state double check.
 - Window height used an incremental `height -= delta` and could shrink to
   nothing when the model count toggled; it is now computed from a base frame.
-- A LaunchAgent instance plus a user `open` started two copies fighting over the
-  Dock icon; the later one now activates the earlier one and exits.
+- A LaunchAgent plus a user `open` started two instances fighting over the Dock
+  icon. Comparing pids was not enough: on login the LaunchAgent's `RunAtLoad` and
+  the Dock's session restore launch both copies within the same second, and each
+  looks for the other before the other has registered — both survived and drew a
+  Dock icon. Single-instance is now arbitrated by an exclusive `flock` on
+  `~/Library/Application Support/Dockolate/instance.lock`; the loser activates the
+  winner and exits. Verified by launching two copies simultaneously.
 - Engine restarts left two rows for one engine (an old process without a port
   next to the serving one); orphan memory is merged into the serving row.
 - `screencapture -R` grabs whatever window is on top; verification uses
