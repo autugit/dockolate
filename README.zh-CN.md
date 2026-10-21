@@ -135,6 +135,47 @@ $BIN --procs                                  # 打印三个进程榜（窗口�
 
 详见 `docs/开发文档.md`。
 
+## 常见问题
+
+**Mac 上不装 `sudo` 怎么看 GPU 占用？**
+不调 `powermetrics`，而是从 `ioreg` 里遍历每个 `AGXDeviceUserClient` 的
+`accumulatedGPUTime` 求和，所以永远不会弹密码框。总 GPU 占用在 Dock 图标上，
+按进程的前三名在窗口里。
+
+**怎么知道本机现在内存里挂着哪些本地 AI 模型？**
+打开窗口。每个认出来的模型服务都会列出它实际占的内存
+（`ri_phys_footprint`，与活动监视器同口径），并标 `running` / `loaded-idle` /
+`failed`；Ollama、LM Studio 里下载了但没加载的也会单独列出。
+
+**这是菜单栏应用还是 Dock 应用？**
+都是，各自独立：Dock 图标是水位（默认开）；菜单栏文字读数（紧凑的
+`C12 G40 M63`）是一个可选勾选框。两个都关就只剩窗口。
+
+**Apple Silicon 还是 Intel？**
+构建目标是 `arm64-apple-macosx13.0`。Intel 机器把 `build.sh` 里这一个目标改成
+`x86_64-apple-macosx13.0` 即可，别处没有架构相关代码。
+
+**需要 root、管理员权限或屏幕录制权限吗？**
+都不需要。数据全来自公开 API —— `host_statistics64`、
+`host_processor_info`、`proc_pid_rusage`、`proc_pidinfo`、`ioreg`。
+没有特权守护进程，没有 entitlement，也不会弹权限申请。
+
+**数据会离开本机吗？**
+不会。HTTP 只发往 `127.0.0.1`；没有遥测，也没有更新检查。
+
+**自定义端口的模型服务没被认出来。**
+端口是从「认出来的进程实际监听的端口」反推的。进程认不出来时，可在
+`~/Library/Application Support/Dockolate/engines.json` 里显式声明
+`{"extraPorts": [12345]}`。
+
+**和 iStat Menus、Stats、活动监视器有什么区别？**
+那三个报在菜单栏或窗口里。Dockolate 的前提是 Dock 始终在眼前，四格水位隔着房间
+就能回答「这台机器现在有没有压力」；而且它是这几个里唯一会把内存中常驻的本地
+AI 模型清点出来的。
+
+**为什么叫 Dockolate？**
+它住在 Dock 里，2×2 的图标看着像一板掰开的巧克力。
+
 ## 作者
 
 由 **Autumemory** 与 **Hermes**（agent）、**DeepSeek v4.1 flash**（模型）共同完成。

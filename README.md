@@ -174,6 +174,52 @@ No root, no private entitlements, no telemetry, no network access beyond
 
 Everything is read locally. Nothing is transmitted, collected or logged.
 
+## Common questions
+
+**How do I watch GPU usage on a Mac without `sudo`?**
+Dockolate sums `accumulatedGPUTime` over every `AGXDeviceUserClient` instance
+from `ioreg`, instead of calling `powermetrics` — so it never prompts for a
+password. Total GPU load is on the Dock icon; the top 3 processes by GPU are in
+the window.
+
+**How do I see which local AI models are loaded in RAM right now?**
+Open the window. Every identified model server is listed with the memory it
+actually holds (`ri_phys_footprint`, the Activity Monitor figure), tagged
+`running` / `loaded-idle` / `failed` — plus what Ollama or LM Studio have
+downloaded but not loaded.
+
+**Is this a menu bar app or a Dock app?**
+Both, independently: the Dock icon is the gauge (default on); the menu bar
+readout — compact `C12 G40 M63` — is an optional checkbox. With both off you get
+a plain window.
+
+**Does it run on Apple Silicon or Intel?**
+The build targets `arm64-apple-macosx13.0`. For Intel, change that one target in
+`build.sh` to `x86_64-apple-macosx13.0`; nothing else is architecture-specific.
+
+**Does it need root, admin rights, or screen-recording permission?**
+No. Everything comes from public APIs — `host_statistics64`,
+`host_processor_info`, `proc_pid_rusage`, `proc_pidinfo`, `ioreg`. No privileged
+helper, no entitlement, no permission prompt.
+
+**Does any data leave the machine?**
+No. HTTP requests only ever go to `127.0.0.1`; there is no telemetry and no
+update check.
+
+**A model server on a custom port is not detected.**
+Ports are discovered from the ports the identified processes actually listen on.
+If a process cannot be identified, declare the port in
+`~/Library/Application Support/Dockolate/engines.json` as `{"extraPorts": [12345]}`.
+
+**How is this different from iStat Menus, Stats, or Activity Monitor?**
+Those report into the menu bar or a window. Dockolate's premise is that the Dock
+is always on screen, so four water-level cells answer "is this machine under
+pressure?" from across the room — and it is the only one of the three that
+inventories the local AI models actually resident in RAM.
+
+**Why "Dockolate"?**
+It sits in the Dock, and the 2×2 icon looks like a scored bar of chocolate.
+
 ## Authors
 
 Built by **Autumemory** together with **Hermes** (agent) and **DeepSeek v4.1 flash** (model).

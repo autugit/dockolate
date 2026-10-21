@@ -4,6 +4,20 @@ All notable changes to Dockolate are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/).
 
+## [Unreleased]
+
+### Docs — discoverability
+
+- README (EN + zh-CN): new "Common questions" section — nine natural-language
+  questions a stranger would actually type (GPU without `sudo`, which local
+  models are resident, Apple Silicon vs Intel, permissions, difference from
+  iStat Menus / Stats / Activity Monitor, custom ports, the name).
+- Repository topics 10 → 15: `apple-silicon`, `cpu-monitor`, `local-ai`,
+  `macos-app`, `resource-monitor`.
+- `docs/开发文档.md` §13 records the measured search-index state: GitHub repo
+  search finds the repository, GitHub code search does not yet, and web search
+  engines have not indexed it (the repo was ~20 h old with zero inbound links).
+
 ## [1.0.0] — first public release
 
 The first version published on GitHub. Everything below was already running on a
