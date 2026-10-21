@@ -1259,20 +1259,26 @@ if CommandLine.arguments.contains("--dump") {
     exit(0)
 }
 
-// 单实例：LaunchAgent 常驻的实例 + 用户 `open`/双击起的实例会各自画一份 Dock 图标，
-// 两份互相抢图标、窗口也会各开一个。后启动的那份把先启动的激活到前台，自己退出
-// （plist 的 KeepAlive 只对非零退出生效，所以正常 exit(0) 不会被 launchd 拉起）。
-// 自检模式（--dump/--models/--procs）带参数，不参与这个判断。
+// 单实例：用**文件锁**，不用 pid 比较。
+// 踩过：LaunchAgent 的 RunAtLoad 与 Dock 的登录恢复几乎同时拉起两份，
+// 两边用 runningApplications 查对方时可能都还查不到，于是两份都活下来、各画一个 Dock 图标。
+// flock 是内核仲裁，谁先拿到谁活；后到的那份激活前者再退出。
+// （plist 的 KeepAlive.SuccessfulExit=false 只对非零退出生效，正常 exit(0) 不会被拉起。）
+// 自检模式带参数，不参与。
+var instanceLockFD: Int32 = -1
 if CommandLine.arguments.count <= 1 {
-    let me = ProcessInfo.processInfo.processIdentifier
-    let bundleID = Bundle.main.bundleIdentifier ?? "io.github.autugit.dockolate"
-    let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        .filter { $0.processIdentifier != me }
-    if let first = others.min(by: { $0.processIdentifier < $1.processIdentifier }),
-       first.processIdentifier < me {
-        first.activate(options: [.activateIgnoringOtherApps])
+    let lockDir = NSHomeDirectory() + "/Library/Application Support/Dockolate"
+    try? FileManager.default.createDirectory(atPath: lockDir, withIntermediateDirectories: true)
+    instanceLockFD = open(lockDir + "/instance.lock", O_CREAT | O_RDWR, 0o600)
+    if instanceLockFD >= 0, flock(instanceLockFD, LOCK_EX | LOCK_NB) != 0 {
+        if let other = NSRunningApplication
+            .runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .first(where: { $0.processIdentifier != getpid() }) {
+            other.activate(options: [.activateIgnoringOtherApps])
+        }
         exit(0)
     }
+    // 拿到锁就把 fd 一直留着：进程退出时内核自动释放，不写 pid 文件、不留垃圾
 }
 
 let app = NSApplication.shared
