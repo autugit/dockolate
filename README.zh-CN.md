@@ -1,6 +1,7 @@
 # Dockolate
 
 [![Release](https://img.shields.io/github/v/release/autugit/dockolate?display_name=tag)](https://github.com/autugit/dockolate/releases/latest)
+[![Website](https://img.shields.io/badge/website-autugit.github.io%2Fdockolate-e0b040)](https://autugit.github.io/dockolate/)
 [![License: MIT](https://img.shields.io/github/license/autugit/dockolate)](LICENSE)
 [![Platform](https://img.shields.io/badge/macOS-13%2B-blue)](https://github.com/autugit/dockolate)
 [![Stars](https://img.shields.io/github/stars/autugit/dockolate)](https://github.com/autugit/dockolate/stargazers)

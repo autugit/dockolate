@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dockolate — CPU, GPU &amp; memory gauge in the macOS Dock, plus a live local-AI model inventory</title>
+<meta name="description" content="Dockolate puts a four-cell CPU / GPU / memory / swap water-level gauge on your macOS Dock icon, and lists which local AI models — Ollama, LM Studio, llama.cpp, oMLX, ComfyUI — are actually resident in RAM. Free, MIT, Swift, no dependencies, no Electron.">
+<link rel="canonical" href="https://autugit.github.io/dockolate/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Dockolate — a chocolate bar in your Dock">
+<meta property="og:description" content="A CPU / GPU / memory / swap water-level gauge in the macOS Dock, plus a live inventory of the local AI models actually loaded in RAM.">
+<meta property="og:url" content="https://autugit.github.io/dockolate/">
+<meta property="og:image" content="https://autugit.github.io/dockolate/img/window.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Dockolate — a chocolate bar in your Dock">
+<meta name="twitter:description" content="CPU / GPU / memory gauge in the macOS Dock + a live inventory of resident local AI models.">
+<meta name="twitter:image" content="https://autugit.github.io/dockolate/img/window.png">
+<style>
+  :root{
+    --bg:#141210; --card:#1d1a17; --line:#2e2a26; --fg:#efe7dc; --muted:#a99f92;
+    --gold:#e0b040; --cream:#f0e0a0; --green:#50c070; --blue:#5aa9e6; --red:#e0604d;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--gold);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:820px;margin:0 auto;padding:0 22px}
+  header{padding:56px 0 8px}
+  .brand{display:flex;align-items:center;gap:16px}
+  .brand img{width:76px;height:76px;image-rendering:auto}
+  h1{margin:0;font-size:30px;letter-spacing:-.4px}
+  .tag{margin:6px 0 0;color:var(--muted);font-size:15px}
+  .lede{margin:22px 0 0;font-size:19px;line-height:1.6;color:#ded4c6}
+  .lede strong{color:var(--cream);font-weight:600}
+  .cta{display:flex;flex-wrap:wrap;gap:12px;margin:26px 0 0}
+  .btn{display:inline-block;padding:11px 20px;border-radius:9px;border:1px solid var(--line);
+    background:var(--card);color:var(--fg);font-weight:600;font-size:15px}
+  .btn.primary{background:var(--gold);border-color:var(--gold);color:#241c0a}
+  .btn:hover{text-decoration:none;border-color:var(--gold)}
+  .shot{margin:40px 0 0;text-align:center}
+  .shot img{max-width:100%;width:520px;border-radius:14px;border:1px solid var(--line)}
+  .shot figcaption{color:var(--muted);font-size:13px;margin-top:10px}
+  h2{font-size:21px;margin:56px 0 14px;letter-spacing:-.2px}
+  h2 .n{color:var(--gold);font-family:var(--mono);font-size:15px;margin-right:9px}
+  p{margin:12px 0}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h3{margin:0 0 6px;font-size:15px;color:var(--cream)}
+  .card p{margin:0;font-size:14px;color:var(--muted)}
+  pre{font-family:var(--mono);font-size:14px;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:16px 18px;overflow-x:auto;line-height:1.55}
+  code{font-family:var(--mono);font-size:.92em;background:#242019;padding:1px 5px;border-radius:5px}
+  pre code{background:none;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+  .gauge{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0 0}
+  .cell{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
+  .cell .l{font-family:var(--mono);font-size:20px;font-weight:700}
+  .cell .d{font-size:12.5px;color:var(--muted);margin-top:4px}
+  .c-cpu .l{color:var(--blue)} .c-gpu .l{color:var(--green)}
+  .c-mem .l{color:var(--gold)} .c-swap .l{color:var(--red)}
+  details{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:13px 17px;margin:10px 0}
+  details summary{cursor:pointer;font-weight:600;font-size:15px;color:var(--cream)}
+  details p{margin:10px 0 0;font-size:14.5px;color:#cfc6b9}
+  footer{margin:70px 0 60px;padding-top:26px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:13.5px;display:flex;flex-wrap:wrap;gap:8px 20px}
+  .note{color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">
+    <img src="img/dock-icon.png" width="76" height="76" alt="Dockolate Dock icon: a 2×2 grid of water-level cells labelled C, G, M, Z">
+    <div>
+      <h1>Dockolate</h1>
+      <p class="tag">a chocolate bar in your Dock · macOS 13+ · MIT · Swift, no dependencies</p>
+    </div>
+  </div>
+  <p class="lede">A <strong>CPU / GPU / memory / swap water-level gauge</strong> living on your macOS Dock icon —
+  and the only system monitor that tells you <strong>which local AI models are actually resident in RAM</strong> right now.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/autugit/dockolate/releases/latest">Download for macOS</a>
+    <a class="btn" href="https://github.com/autugit/dockolate">Source on GitHub</a>
+    <a class="btn" href="https://github.com/autugit/dockolate/blob/main/README.zh-CN.md">中文说明</a>
+  </div>
+</header>
+
+<figure class="shot">
+  <img src="img/window.png" width="520" alt="Dockolate window listing resident local AI models with their memory footprint, the top processes by CPU / GPU / memory, and the memory breakdown">
+  <figcaption>The window: local AI models in memory, top processes, memory breakdown.</figcaption>
+</figure>
+
+<h2><span class="n">01</span>Four cells, no digits</h2>
+<p>The Dock is always on screen, so four water-level cells answer “is this machine under pressure?” from across the room.
+Colour climbs blue → green → yellow → red as a level rises; the icon repaints only when an integer percentage changes, which is what keeps it at ~2 % CPU.</p>
+<div class="gauge">
+  <div class="cell c-cpu"><div class="l">C</div><div class="d">CPU</div></div>
+  <div class="cell c-gpu"><div class="l">G</div><div class="d">GPU</div></div>
+  <div class="cell c-mem"><div class="l">M</div><div class="d">memory used</div></div>
+  <div class="cell c-swap"><div class="l">Z</div><div class="d">compressed + swap</div></div>
+</div>
+
+<h2><span class="n">02</span>Local AI model inventory</h2>
+<div class="grid">
+  <div class="card">
+    <h3>What is loaded, and what it costs</h3>
+    <p>Every identified model server, sorted by footprint, with the memory it really holds — <code>ri_phys_footprint</code>, the same figure Activity Monitor shows.</p>
+  </div>
+  <div class="card">
+    <h3>running / loaded-idle / failed</h3>
+    <p>“running” means the process is alive <em>and</em> it computed something in the last 12 s. Weights resident but silent reads “loaded-idle”, so you can tell the two apart at a glance.</p>
+  </div>
+  <div class="card">
+    <h3>Per-process GPU, no <code>sudo</code></h3>
+    <p>Sums <code>accumulatedGPUTime</code> across <code>AGXDeviceUserClient</code> instances from <code>ioreg</code> instead of calling <code>powermetrics</code> — never a password prompt.</p>
+  </div>
+</div>
+
+<h2><span class="n">03</span>Install</h2>
+<pre><code>git clone https://github.com/autugit/dockolate.git &amp;&amp; cd dockolate
+./install.sh          # build → ~/Applications → LaunchAgent (login item + auto-restart)</code></pre>
+<p class="note">Or take the <a href="https://github.com/autugit/dockolate/releases/latest">prebuilt release</a>. The app is ad-hoc signed, not notarized: first launch needs
+right-click → Open, or <code>xattr -d com.apple.quarantine /path/to/Dockolate.app</code>.
+Build-only is <code>./build.sh</code>; uninstall is <code>./uninstall.sh</code>. Requires macOS 13+ and the Xcode command line tools.
+The build targets Apple Silicon — for Intel, change one target in <code>build.sh</code> to <code>x86_64-apple-macosx13.0</code>.</p>
+
+<h2><span class="n">04</span>Supported local engines</h2>
+<p>Ports are <em>discovered</em>, not assumed: Dockolate first looks at the ports the identified model processes actually listen on, so a server you moved to a custom port is still found. The built-in table is only a fallback, and anything else can be declared in <code>engines.json</code>.</p>
+<table>
+  <thead><tr><th>Engine</th><th>How the model name is obtained</th></tr></thead>
+  <tbody>
+    <tr><td>Ollama</td><td><code>GET /api/ps</code> (running) + <code>GET /api/tags</code> (downloaded → “not loaded”)</td></tr>
+    <tr><td>LM Studio</td><td><code>GET /api/v0/models</code>, <code>state == "loaded"</code></td></tr>
+    <tr><td>llama.cpp <code>llama-server</code></td><td><code>GET /v1/models</code>, with <code>--model</code> argv fallback</td></tr>
+    <tr><td>vLLM / MLX / oMLX</td><td><code>GET /v1/models</code></td></tr>
+    <tr><td>ComfyUI</td><td><code>GET /queue</code> → <code>GET /history</code> → <code>ckpt_name</code> / <code>unet_name</code></td></tr>
+    <tr><td>A1111 / Forge / Draw Things</td><td><code>GET /sdapi/v1/options</code> → <code>sd_model_checkpoint</code></td></tr>
+    <tr><td>Fooocus / InvokeAI / KoboldCpp / text-generation-webui</td><td><code>GET /v1/models</code></td></tr>
+  </tbody>
+</table>
+<p class="note">Any OpenAI-compatible server on a port you declare is probed the same way.</p>
+
+<h2><span class="n">05</span>Common questions</h2>
+
+<details>
+  <summary>How do I watch GPU usage on a Mac without <code>sudo</code>?</summary>
+  <p>Dockolate sums <code>accumulatedGPUTime</code> over every <code>AGXDeviceUserClient</code> instance from <code>ioreg</code> instead of calling <code>powermetrics</code>, so it never prompts for a password. Total GPU load is on the Dock icon; the top three processes by GPU are in the window.</p>
+</details>
+
+<details>
+  <summary>How do I see which local AI models are loaded in RAM right now?</summary>
+  <p>Open the window. Every identified model server is listed with the memory it actually holds (<code>ri_phys_footprint</code>, the Activity Monitor figure), tagged running / loaded-idle / failed — plus what Ollama or LM Studio have downloaded but not loaded.</p>
+</details>
+
+<details>
+  <summary>Is this a menu bar app or a Dock app?</summary>
+  <p>Both, independently: the Dock icon is the gauge (default on), and the menu bar readout — a compact <code>C12 G40 M63</code> — is an optional checkbox. With both off you get a plain window.</p>
+</details>
+
+<details>
+  <summary>Does it run on Apple Silicon or Intel?</summary>
+  <p>The build targets <code>arm64-apple-macosx13.0</code>. For Intel, change that one target in <code>build.sh</code> to <code>x86_64-apple-macosx13.0</code>; nothing else is architecture-specific.</p>
+</details>
+
+<details>
+  <summary>Does it need root, admin rights, or screen-recording permission?</summary>
+  <p>No. Everything comes from public APIs — <code>host_statistics64</code>, <code>host_processor_info</code>, <code>proc_pid_rusage</code>, <code>proc_pidinfo</code>, <code>ioreg</code>. No privileged helper, no entitlement, no permission prompt.</p>
+</details>
+
+<details>
+  <summary>Does any data leave the machine?</summary>
+  <p>No. HTTP requests only ever go to <code>127.0.0.1</code>; there is no telemetry and no update check.</p>
+</details>
+
+<details>
+  <summary>A model server on a custom port is not detected.</summary>
+  <p>Ports are discovered from the ports the identified processes actually listen on. If a process cannot be identified, declare the port in <code>~/Library/Application Support/Dockolate/engines.json</code> as <code>{"extraPorts": [12345]}</code>.</p>
+</details>
+
+<details>
+  <summary>How is this different from iStat Menus, Stats, or Activity Monitor?</summary>
+  <p>Those report into the menu bar or a window. Dockolate's premise is that the Dock is always on screen, so four water-level cells answer “is this machine under pressure?” from across the room — and it is the only one of the three that inventories the local AI models actually resident in RAM.</p>
+</details>
+
+<details>
+  <summary>Why “Dockolate”?</summary>
+  <p>It sits in the Dock, and the 2×2 icon looks like a scored bar of chocolate.</p>
+</details>
+
+<footer>
+  <span>MIT licensed · built by Autumemory with Hermes (agent) and DeepSeek v4.1 flash (model)</span>
+  <a href="https://github.com/autugit/dockolate">github.com/autugit/dockolate</a>
+  <a href="https://github.com/autugit/dockolate/blob/main/CHANGELOG.md">Changelog</a>
+</footer>
+
+</div>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Dockolate",
+  "alternateName": "Dockolate for macOS",
+  "applicationCategory": "UtilitiesApplication",
+  "applicationSubCategory": "System monitoring",
+  "operatingSystem": "macOS 13 or later",
+  "processorRequirements": "Apple Silicon (Intel via one build.sh target change)",
+  "fileSize": "2 MB",
+  "softwareVersion": "1.0.0",
+  "inLanguage": ["en", "zh-CN"],
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "downloadUrl": "https://github.com/autugit/dockolate/releases/latest",
+  "codeRepository": "https://github.com/autugit/dockolate",
+  "screenshot": "https://autugit.github.io/dockolate/img/window.png",
+  "description": "Dockolate puts a four-cell CPU, GPU, memory and swap water-level gauge on the macOS Dock icon and lists which local AI models — Ollama, LM Studio, llama.cpp, oMLX, ComfyUI, A1111 — are actually resident in RAM, with per-process GPU usage measured without root.",
+  "author": { "@type": "Person", "name": "Autumemory" },
+  "featureList": [
+    "CPU / GPU / memory / swap water-level gauge on the Dock icon",
+    "Live inventory of local AI models resident in RAM",
+    "Per-process GPU usage without sudo or powermetrics",
+    "Optional menu bar readout",
+    "No Electron, no dependencies, no telemetry"
+  ]
+}
+</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I watch GPU usage on a Mac without sudo?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Dockolate sums accumulatedGPUTime over every AGXDeviceUserClient instance from ioreg instead of calling powermetrics, so it never prompts for a password. Total GPU load is on the Dock icon; the top three processes by GPU are in the window." }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I see which local AI models are loaded in RAM right now?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Open the Dockolate window: every identified model server is listed with the memory it actually holds (ri_phys_footprint, the Activity Monitor figure), tagged running, loaded-idle or failed, plus what Ollama or LM Studio have downloaded but not loaded." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is Dockolate a menu bar app or a Dock app?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Both, independently. The Dock icon is the gauge (default on); the menu bar readout showing C12 G40 M63 is an optional checkbox. With both off you get a plain window." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Dockolate run on Apple Silicon or Intel?",
+      "acceptedAnswer": { "@type": "Answer", "text": "The build targets arm64-apple-macosx13.0. For Intel, change that one target in build.sh to x86_64-apple-macosx13.0; nothing else is architecture-specific." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Dockolate need root, admin rights, or screen-recording permission?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Everything comes from public APIs: host_statistics64, host_processor_info, proc_pid_rusage, proc_pidinfo and ioreg. No privileged helper, no entitlement, no permission prompt." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does any data leave the machine?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. HTTP requests only ever go to 127.0.0.1; there is no telemetry and no update check." }
+    },
+    {
+      "@type": "Question",
+      "name": "A model server on a custom port is not detected — what now?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Ports are discovered from the ports the identified processes actually listen on. If a process cannot be identified, declare the port in ~/Library/Application Support/Dockolate/engines.json as {\"extraPorts\": [12345]}." }
+    },
+    {
+      "@type": "Question",
+      "name": "How is Dockolate different from iStat Menus, Stats or Activity Monitor?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Those report into the menu bar or a window. Dockolate's premise is that the Dock is always on screen, so four water-level cells answer whether the machine is under pressure from across the room, and it is the only one of the three that inventories the local AI models actually resident in RAM." }
+    },
+    {
+      "@type": "Question",
+      "name": "Why is it called Dockolate?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It sits in the Dock, and the 2x2 icon looks like a scored bar of chocolate." }
+    }
+  ]
+}
+</script>
+</body>
+</html>

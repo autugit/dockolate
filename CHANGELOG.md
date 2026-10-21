@@ -8,6 +8,9 @@ All notable changes to Dockolate are documented here. Format follows
 
 ### Docs — discoverability
 
+- New **landing page** `docs/index.html` for GitHub Pages
+  (https://autugit.github.io/dockolate/) — `SoftwareApplication` + `FAQPage`
+  JSON-LD, OpenGraph/Twitter cards, direct download button.
 - README (EN + zh-CN): new "Common questions" section — nine natural-language
   questions a stranger would actually type (GPU without `sudo`, which local
   models are resident, Apple Silicon vs Intel, permissions, difference from
