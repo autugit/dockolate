@@ -6,6 +6,24 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed — engine rows for two-layer engines (Splash 1.4)
+
+- **A model whose weights live in a child process was reported as an idle shell.**
+  Each engine row took its memory and activity from whichever process *listens* on
+  the port. Splash 1.4 serves HTTP from a small Python parent (≈0.4 GB) and runs the
+  model in an `engine/splash serve-native` child (27–36 GB, all the GPU work), so the
+  row read **「挂载待机 / 0.41 GB」** while the machine sat at 60–85 % GPU decoding —
+  and `splash` was not in the process-name hints at all, so the child was never
+  scanned to begin with.
+- Fix: `splash` added to the process hints; every engine row now aggregates memory
+  and CPU/GPU activity across the holder's **process tree** (`ppid` read via
+  `PROC_PIDTBSDINFO`), and descendants of a claimed holder are skipped instead of
+  being listed a second time.
+- Verified live (2026-10-23, M5 Ultra): row went from `挂载待机 0.41 GB` to
+  `正在运行 35.51 GB` with `splash` showing 85 % GPU. Cross-check: the app's own
+  top-memory list read 35.12 GB for the child, and 0.41 + 35.12 = 35.53 matches the
+  reported total.
+
 ### Docs — discoverability
 
 - New **landing page** `docs/index.html` for GitHub Pages
