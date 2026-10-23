@@ -6,6 +6,22 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-23
+
+### Fixed — no machine-specific ports in public code
+
+- Dropped three **non-default** ports from `knownEngines` (multi-instance llama.cpp
+  numbers and one used by a retired local engine). That table only supplies a fallback
+  *name* for processes that cannot be identified — a process's real listening ports are
+  discovered and probed anyway — so hard-coding non-default numbers just freezes one
+  machine's history into shared code.
+- Removed the extra SD.Next port too: SD.Next reuses A1111's 7860, so that label now
+  reads `A1111 / SD.Next / Draw Things`. Fooocus moved to its official default 7865
+  (the old value was habit, not its default).
+- Concrete port numbers in comments and changelog prose became generic wording
+  ("a reverse proxy / gateway port"), and machine-specific memory figures were dropped
+  from code comments — those describe an operating site, not the detection rule.
+
 ## [1.1.0] — 2026-10-23
 
 ### Added — engine whitelist
@@ -19,14 +35,16 @@ All notable changes to Dockolate are documented here. Format follows
   Fooocus, InvokeAI, SD.Next, sd.cpp, A1111/Forge/reForge, Draw Things,
   DiffusionBee, Amuse, mflux, Qwen-Image, Flux, Wan, MiniMax, HunyuanVideo,
   LTX-Video, CogVideo) and speech (Whisper, Kokoro, Coqui, ChatTTS, Piper, XTTS).
-- `knownEngines` fallback port table: 16 → 23 entries (added Jan 1337, GPT4All 4891,
-  OpenLLM 3000, LiteLLM 4000, Xinference 9997, SGLang 30000, SwarmUI 7801, SD.Next 7862).
+- `knownEngines` fallback port table: 16 → 19 entries, official defaults only
+  (added Jan 1337, GPT4All 4891, OpenLLM 3000, LiteLLM 4000, Xinference 9997,
+  SGLang 30000, SwarmUI 7801, Fooocus 7865).
 - Ordering is documented in-file: specific patterns precede generic ones
   (`reforge` before `forge`, `text-generation-webui` before `webui.py`), and
   `quickHints` deliberately omits broad words (`swift`, `exo`, `wan`) so the 2-second
   scan does not parse argv/fd tables of unrelated processes.
-- `knownEngines` now carries an explicit warning **not** to add the model gateway port
-  (8010) — a proxy listed as an engine would report the same model twice.
+- `knownEngines` now carries an explicit warning **not** to register a reverse proxy
+  or gateway port as an engine — a proxy listed as an engine reports the same model
+  twice.
 
 ### Fixed — engine rows for two-layer engines (Splash 1.4)
 
@@ -45,9 +63,9 @@ All notable changes to Dockolate are documented here. Format follows
   `正在运行 35.51 GB` with `splash` showing 85 % GPU. Cross-check: the app's own
   top-memory list read 35.12 GB for the child, and 0.41 + 35.12 = 35.53 matches the
   reported total.
-- Whitelist verified with a fake OpenAI-compatible server on 9997: it was picked up
-  as `Xinference · 端口 9997` and listed both served model ids, with no duplicate row
-  for the parent/child pair on 8000.
+- Whitelist verified with a fake OpenAI-compatible server on a spare port: it was picked up
+  as `Xinference` and listed both served model ids, with no duplicate row for the
+  two-layer engine's parent/child pair.
 
 ### Docs — discoverability
 

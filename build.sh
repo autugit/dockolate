@@ -31,8 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>       <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key>           <string>1.1.0</string>
-    <key>CFBundleShortVersionString</key><string>1.1.0</string>
+    <key>CFBundleVersion</key>           <string>1.1.1</string>
+    <key>CFBundleShortVersionString</key><string>1.1.1</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>LSUIElement</key>               <false/>
