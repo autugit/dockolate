@@ -160,33 +160,29 @@ struct ModelProc {
 
 final class EngineWatcher {
     /// 端口 → 引擎名的**兜底表**：只在进程认不出来（classify 失败）时用来给个名字。
-    /// 8545 这类自定义端口不用管 —— 进程监听的端口本来就会被扫到并探测。
-    /// ⚠️ 不要加 8010：那是本机的模型网关（反向代理），收进来会把同一个真实模型列两遍。
+    /// 只收各家**官方默认端口**；自定义端口不用管 —— 进程实际监听的端口本来就会被扫到并探测。
+    /// ⚠️ 不要把反向代理 / 网关端口登记成引擎：同一个真实模型会被列两遍。
     static let knownEngines: [Int: String] = [
         // 对话模型
         11434: "Ollama",
         1234:  "LM Studio",
         1337:  "Jan",
         4891:  "GPT4All",
-        8000:  "本地推理服务",
-        8001:  "本地推理服务",
-        8080:  "llama.cpp",
-        8081:  "llama.cpp",
-        8082:  "llama.cpp",
         3000:  "OpenLLM",
         4000:  "LiteLLM",
         5000:  "text-generation-webui",
         5001:  "KoboldCpp",
+        8000:  "本地推理服务",          // vLLM 的默认端口，也是多数 OpenAI 兼容服务的默认
+        8080:  "llama.cpp",             // llama-server 的默认端口
         9997:  "Xinference",
         30000: "SGLang",
         // 图像 / 视频
         7801:  "SwarmUI",
-        7860:  "A1111 / Draw Things",
+        7860:  "A1111 / SD.Next / Draw Things",
         7861:  "A1111",
-        7862:  "SD.Next",
+        7865:  "Fooocus",
         8188:  "ComfyUI",
         8189:  "ComfyUI",
-        8888:  "Fooocus",
         9090:  "InvokeAI",
     ]
 
@@ -205,7 +201,7 @@ final class EngineWatcher {
     private var configLoaded = false
 
     /// 读 ~/Library/Application Support/Dockolate/engines.json：
-    /// { "extraPorts": [9000], "apiKeys": { "8000": "sk-..." } }
+    /// { "extraPorts": [9000], "apiKeys": { "9000": "sk-..." } }
     private func loadConfigIfNeeded() {
         guard !configLoaded else { return }
         configLoaded = true
@@ -377,8 +373,8 @@ final class EngineWatcher {
     }
 
     /// 父进程 pid —— 进程树归并用。
-    /// Splash 1.4 是「python 父进程监听 8000、serve-native 子进程跑推理并吃 27 GB」的结构，
-    /// 只认监听端口的那个 pid 会得到 0.4 GB 的空壳数字。
+    /// 有的引擎是「小父进程只做 HTTP、子进程持有权重并跑推理」的两层结构（Splash 1.4 就是这样），
+    /// 只认监听端口的那个 pid 会得到一个空壳的内存数字。
     private func ppidOf(_ pid: pid_t) -> pid_t {
         var info = proc_bsdinfo()
         let r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.stride))
