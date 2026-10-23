@@ -59,7 +59,7 @@ All notable changes to Dockolate are documented here. Format follows
   and CPU/GPU activity across the holder's **process tree** (`ppid` read via
   `PROC_PIDTBSDINFO`), and descendants of a claimed holder are skipped instead of
   being listed a second time.
-- Verified live (2026-10-23, M5 Ultra): row went from `挂载待机 0.41 GB` to
+- Verified live (2026-10-23, Apple Silicon): row went from `挂载待机 0.41 GB` to
   `正在运行 35.51 GB` with `splash` showing 85 % GPU. Cross-check: the app's own
   top-memory list read 35.12 GB for the child, and 0.41 + 35.12 = 35.53 matches the
   reported total.
