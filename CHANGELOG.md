@@ -6,12 +6,34 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-23
+
+### Added — engine whitelist
+
+- Process hints (`kindHints`) went from 30 to **68 keywords** covering four families:
+  conversational (Ollama, LM Studio, llama.cpp/llamafile, vLLM, SGLang, TGI,
+  TensorRT-LLM, LocalAI, Xinference, FastChat, OpenLLM, LiteLLM, TabbyAPI,
+  KTransformers, MLC LLM, RamaLama, Petals, GPT4All, Jan, Docker Model Runner,
+  text-generation-webui, KoboldCpp), MLX-family engines (Splash, oMLX, MTPLX,
+  Flash-Next, Swift-Qwen, mlx_lm/mlx_vlm servers), image/video (ComfyUI, SwarmUI,
+  Fooocus, InvokeAI, SD.Next, sd.cpp, A1111/Forge/reForge, Draw Things,
+  DiffusionBee, Amuse, mflux, Qwen-Image, Flux, Wan, MiniMax, HunyuanVideo,
+  LTX-Video, CogVideo) and speech (Whisper, Kokoro, Coqui, ChatTTS, Piper, XTTS).
+- `knownEngines` fallback port table: 16 → 23 entries (added Jan 1337, GPT4All 4891,
+  OpenLLM 3000, LiteLLM 4000, Xinference 9997, SGLang 30000, SwarmUI 7801, SD.Next 7862).
+- Ordering is documented in-file: specific patterns precede generic ones
+  (`reforge` before `forge`, `text-generation-webui` before `webui.py`), and
+  `quickHints` deliberately omits broad words (`swift`, `exo`, `wan`) so the 2-second
+  scan does not parse argv/fd tables of unrelated processes.
+- `knownEngines` now carries an explicit warning **not** to add the model gateway port
+  (8010) — a proxy listed as an engine would report the same model twice.
+
 ### Fixed — engine rows for two-layer engines (Splash 1.4)
 
 - **A model whose weights live in a child process was reported as an idle shell.**
   Each engine row took its memory and activity from whichever process *listens* on
   the port. Splash 1.4 serves HTTP from a small Python parent (≈0.4 GB) and runs the
-  model in an `engine/splash serve-native` child (27–36 GB, all the GPU work), so the
+  model in an `engine/splash serve-native` child (27–40 GB, all the GPU work), so the
   row read **「挂载待机 / 0.41 GB」** while the machine sat at 60–85 % GPU decoding —
   and `splash` was not in the process-name hints at all, so the child was never
   scanned to begin with.
@@ -23,6 +45,9 @@ All notable changes to Dockolate are documented here. Format follows
   `正在运行 35.51 GB` with `splash` showing 85 % GPU. Cross-check: the app's own
   top-memory list read 35.12 GB for the child, and 0.41 + 35.12 = 35.53 matches the
   reported total.
+- Whitelist verified with a fake OpenAI-compatible server on 9997: it was picked up
+  as `Xinference · 端口 9997` and listed both served model ids, with no duplicate row
+  for the parent/child pair on 8000.
 
 ### Docs — discoverability
 

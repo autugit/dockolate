@@ -61,14 +61,25 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 
 | 引擎 | 模型名怎么来 |
 |---|---|
-| Ollama | `GET /api/ps`（在跑）+ `GET /api/tags`（已下载 → 未加载清单） |
-| LM Studio | `GET /api/v0/models` 的 `state == "loaded"` |
-| llama.cpp `llama-server` | `GET /v1/models`，取不到再从 `--model` 参数抠 |
-| vLLM / MLX / oMLX | `GET /v1/models` |
-| ComfyUI | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
-| A1111 / Forge / Draw Things | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
-| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | `GET /v1/models` |
-| 应用内模型（Draw Things、LM Studio 桌面版） | 进程指纹 + `phys_footprint` |
+| **Ollama** | `GET /api/ps`（在跑）+ `GET /api/tags`（已下载 → 未加载清单） |
+| **LM Studio** | `GET /api/v0/models` 的 `state == "loaded"` |
+| **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`，取不到再从 `--model` 参数抠 |
+| **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
+| **MLX 系：Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`，取不到再从 argv 抠 |
+| **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` 或进程指纹 |
+| **ComfyUI** | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
+| **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
+| **Fooocus / InvokeAI / SwarmUI / DiffusionBee / Amuse / mflux** | `/v1/models` 或进程指纹 |
+| **视频：Wan / MiniMax / HunyuanVideo / LTX-Video / CogVideo** | 进程指纹 + `phys_footprint` |
+| **语音：Whisper / Kokoro / Coqui / ChatTTS / Piper / XTTS** | 进程指纹 + `phys_footprint` |
+| **应用内模型（Draw Things、LM Studio 桌面版）** | 进程指纹 + `phys_footprint` |
+
+名单在 `src/EngineProbe.swift` 的三张表里：`kindHints`（进程特征词 → 引擎名）、
+`quickHints`（扫描粗筛，值不值得深扫这个进程）、`knownEngines`（进程认不出来时的端口兜底）。
+缺哪个引擎就往 `kindHints` 加一行，判定逻辑不用动；自定义端口用 `engines.json` 补。
+
+有的引擎是**两层进程**（父进程监听端口、子进程跑推理，Splash 1.4 就是：Python 父进程 0.4 GB +
+`serve-native` 子进程几十 GB）。内存与「是否在算」按**整棵进程树**聚合，不会只报父进程那几十 MB。
 
 状态口径：**正在运行** = 端口在应答且最近 12 秒内真算过东西（CPU 或 GPU 时间在涨）；
 **挂载待机** = 权重在内存、端口在应答、没在算；**出现故障** = 进程占着端口但端口不应答；

@@ -159,23 +159,35 @@ struct ModelProc {
 }
 
 final class EngineWatcher {
-    /// 默认探测的端口 → 引擎名（零配置也能认出大多数人的安装）
+    /// 端口 → 引擎名的**兜底表**：只在进程认不出来（classify 失败）时用来给个名字。
+    /// 8545 这类自定义端口不用管 —— 进程监听的端口本来就会被扫到并探测。
+    /// ⚠️ 不要加 8010：那是本机的模型网关（反向代理），收进来会把同一个真实模型列两遍。
     static let knownEngines: [Int: String] = [
+        // 对话模型
         11434: "Ollama",
         1234:  "LM Studio",
+        1337:  "Jan",
+        4891:  "GPT4All",
         8000:  "本地推理服务",
+        8001:  "本地推理服务",
         8080:  "llama.cpp",
         8081:  "llama.cpp",
         8082:  "llama.cpp",
-        8001:  "本地推理服务",
-        8188:  "ComfyUI",
-        8189:  "ComfyUI",
-        7860:  "A1111 / Draw Things",
-        7861:  "A1111",
-        8888:  "Fooocus",
-        9090:  "InvokeAI",
+        3000:  "OpenLLM",
+        4000:  "LiteLLM",
         5000:  "text-generation-webui",
         5001:  "KoboldCpp",
+        9997:  "Xinference",
+        30000: "SGLang",
+        // 图像 / 视频
+        7801:  "SwarmUI",
+        7860:  "A1111 / Draw Things",
+        7861:  "A1111",
+        7862:  "SD.Next",
+        8188:  "ComfyUI",
+        8189:  "ComfyUI",
+        8888:  "Fooocus",
+        9090:  "InvokeAI",
     ]
 
     private let activeWindow: TimeInterval = 12        // 最近多少秒算过东西 ⇒ 正在运行
@@ -216,27 +228,91 @@ final class EngineWatcher {
     }
 
     // ---------- 一、进程识别 ----------
+    // 进程名 / 路径 / argv 里的特征词 → 显示名。**顺序即优先级**：具体的写在前面，
+    // 泛化的（mlx / whisper）放后面兜底，否则 "reforge" 会被 "forge" 吃掉。
     private let kindHints: [(String, String)] = [
+        // 本机 MLX 系引擎
         ("omlx", "oMLX"),
-        ("splash", "Splash"),          // Splash 1.4：引擎装在 /opt/homebrew/opt/splash/，进程名是 splash
-        ("llama-server", "llama.cpp"), ("llama_server", "llama.cpp"), ("llama.cpp", "llama.cpp"),
+        ("splash", "Splash"),                  // Splash 1.4：engine/splash serve-native，权重跑在这层
+        ("mtplx", "MTPLX"),
+        ("flash-next", "Flash-Next"), ("flashnext", "Flash-Next"),
+        ("swift-qwen", "Swift-Qwen"), ("swift_qwen", "Swift-Qwen"),
+        ("dflash", "DFlash"),                  // 草稿模型偶尔单独起服务
         ("mlx_lm.server", "MLX"), ("mlx_vlm.server", "MLX"), ("mlx-lm", "MLX"), ("mlx_vlm", "MLX"),
+        ("mlx", "MLX"),
+
+        // llama.cpp 家族
+        ("llama-server", "llama.cpp"), ("llama_server", "llama.cpp"),
+        ("llama.cpp", "llama.cpp"), ("llama-cpp", "llama.cpp"), ("llamacpp", "llama.cpp"),
+        ("llamafile", "llamafile"),
+
+        // 通用 LLM 服务
         ("ollama", "Ollama"),
         ("lmstudio", "LM Studio"), ("lm studio", "LM Studio"),
-        ("vllm", "vLLM"), ("sglang", "SGLang"), ("kobold", "KoboldCpp"),
+        ("vllm", "vLLM"),
+        ("sglang", "SGLang"),
+        ("tensorrt", "TensorRT-LLM"), ("trtllm", "TensorRT-LLM"),
+        ("text-generation-inference", "TGI"),
+        ("text-generation-webui", "text-generation-webui"),
+        ("kobold", "KoboldCpp"),
+        ("localai", "LocalAI"),
+        ("xinference", "Xinference"),
+        ("fastchat", "FastChat"),
+        ("openllm", "OpenLLM"),
+        ("litellm", "LiteLLM"),
+        ("tabby", "TabbyAPI"),
+        ("ktransformers", "KTransformers"),
+        ("mlc_llm", "MLC LLM"), ("mlc-llm", "MLC LLM"),
+        ("ramalama", "RamaLama"),
+        ("petals", "Petals"),
+        ("gpt4all", "GPT4All"),
+        ("jan.app", "Jan"),
+        ("model-runner", "Docker Model Runner"),
+        ("webui.py", "A1111"),                 // 必须在 text-generation-webui 之后
+
+        // 图像 / 视频
         ("comfyui", "ComfyUI"), ("comfy", "ComfyUI"),
-        ("draw things", "Draw Things"), ("drawthings", "Draw Things"), ("draw-things", "Draw Things"),
-        ("mflux", "mflux"),
-        ("fooocus", "Fooocus"), ("invokeai", "InvokeAI"), ("invoke-ai", "InvokeAI"),
+        ("swarmui", "SwarmUI"),
+        ("fooocus", "Fooocus"),
+        ("invokeai", "InvokeAI"), ("invoke-ai", "InvokeAI"),
+        ("sd.next", "SD.Next"), ("sdnext", "SD.Next"),
         ("stable-diffusion.cpp", "sd.cpp"), ("sd-server", "sd.cpp"), ("sd-cli", "sd.cpp"),
-        ("stable-diffusion-webui", "A1111"), ("webui.py", "A1111"),
+        ("stable-diffusion-webui", "A1111"), ("a1111", "A1111"),
+        ("reforge", "reForge"), ("forge", "Forge"),   // reforge 必须在 forge 之前
+        ("draw things", "Draw Things"), ("drawthings", "Draw Things"), ("draw-things", "Draw Things"),
+        ("diffusionbee", "DiffusionBee"),
+        ("amuse", "Amuse"),
+        ("mflux", "mflux"),
         ("diffusers", "Diffusers"),
         ("qwen-image", "Qwen-Image"), ("qwen_image", "Qwen-Image"),
         ("flux", "Flux"),
+        ("wan2", "Wan"), ("wan-2", "Wan"),
+        ("minimax", "MiniMax"),
+        ("hunyuan", "HunyuanVideo"),
+        ("ltx-video", "LTX-Video"), ("ltx_video", "LTX-Video"),
+        ("cogvideo", "CogVideo"),
+
+        // 语音
+        ("whisper", "Whisper"),                // whisper.cpp / faster-whisper 都归这里
+        ("kokoro", "Kokoro TTS"),
+        ("coqui", "Coqui TTS"),
+        ("chattts", "ChatTTS"),
+        ("piper", "Piper TTS"),
+        ("xtts", "XTTS"),
     ]
-    private let quickHints = ["omlx", "splash", "llama", "mlx", "ollama", "lmstudio", "lm studio", "vllm", "sglang",
-                              "kobold", "comfy", "draw things", "drawthings", "mflux", "fooocus", "invokeai",
-                              "stable-diffusion", "sd-server", "diffusers", "qwen-image", "qwen_image"]
+    // 快速筛选用：只为「值不值得深扫这个进程」把关，所以只放足够具体的词。
+    // 放泛词（swift / exo / wan）会让每 2 秒一次的扫描多跑几十个无关进程的 argv+fd 解析。
+    private let quickHints = ["omlx", "splash", "llama", "mlx", "ollama", "lmstudio", "lm studio",
+                              "vllm", "sglang", "kobold", "comfy", "draw things", "drawthings",
+                              "mflux", "fooocus", "invokeai", "stable-diffusion", "sd-server",
+                              "sdnext", "sd.next", "diffusers", "qwen-image", "qwen_image",
+                              "localai", "xinference", "fastchat", "openllm", "tabby", "llamafile",
+                              "ktransformers", "mlc_llm", "mlc-llm", "ramalama", "petals", "gpt4all",
+                              "jan.app", "text-generation", "tensorrt", "trtllm", "model-runner",
+                              "swarmui", "diffusionbee", "amuse", "wan2", "wan-2", "minimax",
+                              "hunyuan", "ltx-video", "ltx_video", "cogvideo",
+                              "whisper", "kokoro", "coqui", "chattts", "piper", "xtts",
+                              "mtplx", "swift-qwen", "swift_qwen", "flash-next", "flashnext", "dflash"]
     private let interpreters = ["python", "python3", "node", "ruby", "java", "uv", "uvicorn"]
 
     private func classify(name: String, path: String, argv: [String]) -> String? {

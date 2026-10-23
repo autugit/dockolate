@@ -94,14 +94,29 @@ case where a process cannot be identified; anything else can be declared in
 
 | Engine | How the model name is obtained |
 |---|---|
-| Ollama | `GET /api/ps` (running) + `GET /api/tags` (downloaded → "not loaded" list) |
-| LM Studio | `GET /api/v0/models`, `state == "loaded"` |
-| llama.cpp `llama-server` | `GET /v1/models`, `--model` argv fallback |
-| vLLM / MLX / oMLX | `GET /v1/models` |
-| ComfyUI | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
-| A1111 / Forge / Draw Things | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
-| Fooocus / InvokeAI / KoboldCpp / text-generation-webui | `GET /v1/models` |
-| In-app models (Draw Things, LM Studio desktop) | process fingerprint + `phys_footprint` |
+| **Ollama** | `GET /api/ps` (running) + `GET /api/tags` (downloaded → "not loaded" list) |
+| **LM Studio** | `GET /api/v0/models`, `state == "loaded"` |
+| **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`, `--model` argv fallback |
+| **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
+| **MLX family: Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`, argv fallback |
+| **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` or process fingerprint |
+| **ComfyUI** | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
+| **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
+| **Fooocus / InvokeAI / SwarmUI / DiffusionBee / Amuse / mflux** | `/v1/models` or process fingerprint |
+| **Video: Wan / MiniMax / HunyuanVideo / LTX-Video / CogVideo** | process fingerprint + `phys_footprint` |
+| **Speech: Whisper / Kokoro / Coqui / ChatTTS / Piper / XTTS** | process fingerprint + `phys_footprint` |
+| **In-app models (Draw Things, LM Studio desktop)** | process fingerprint + `phys_footprint` |
+
+The list lives in three tables in `src/EngineProbe.swift`: `kindHints` (process
+keywords → engine name), `quickHints` (cheap pre-filter for whether a process is worth
+deep-scanning) and `knownEngines` (port fallback when a process cannot be identified).
+Adding an engine is one line in `kindHints`; the detection logic does not change.
+Custom ports go in `engines.json`.
+
+Some engines run as **two processes** — a small parent that serves HTTP and a child
+that holds the weights and does all the GPU work (Splash 1.4: a 0.4 GB Python parent
+plus a multi-GB `serve-native` child). Memory and the "is it computing" decision are
+aggregated over the **whole process tree**, so the row never reports just the parent.
 
 Any OpenAI-compatible server on a port you declare is probed the same way.
 
