@@ -149,6 +149,8 @@ struct EngineHit {
 /// 扫描到的模型服务进程
 struct ModelProc {
     var pid: pid_t
+    var ppid: pid_t = 0        // 进程树归并用：Splash 这类「父进程监听端口、子进程跑推理」的引擎，
+                               // 只按监听端口取 holder 会拿到几十 MB 的空壳，真实权重在子进程里
     var kind: String
     var display: String
     var memBytes: UInt64
@@ -216,6 +218,7 @@ final class EngineWatcher {
     // ---------- 一、进程识别 ----------
     private let kindHints: [(String, String)] = [
         ("omlx", "oMLX"),
+        ("splash", "Splash"),          // Splash 1.4：引擎装在 /opt/homebrew/opt/splash/，进程名是 splash
         ("llama-server", "llama.cpp"), ("llama_server", "llama.cpp"), ("llama.cpp", "llama.cpp"),
         ("mlx_lm.server", "MLX"), ("mlx_vlm.server", "MLX"), ("mlx-lm", "MLX"), ("mlx_vlm", "MLX"),
         ("ollama", "Ollama"),
@@ -231,7 +234,7 @@ final class EngineWatcher {
         ("qwen-image", "Qwen-Image"), ("qwen_image", "Qwen-Image"),
         ("flux", "Flux"),
     ]
-    private let quickHints = ["omlx", "llama", "mlx", "ollama", "lmstudio", "lm studio", "vllm", "sglang",
+    private let quickHints = ["omlx", "splash", "llama", "mlx", "ollama", "lmstudio", "lm studio", "vllm", "sglang",
                               "kobold", "comfy", "draw things", "drawthings", "mflux", "fooocus", "invokeai",
                               "stable-diffusion", "sd-server", "diffusers", "qwen-image", "qwen_image"]
     private let interpreters = ["python", "python3", "node", "ruby", "java", "uv", "uvicorn"]
@@ -295,6 +298,15 @@ final class EngineWatcher {
         }
         guard kr == 0 else { return nil }
         return (info.ri_phys_footprint, info.ri_user_time + info.ri_system_time)
+    }
+
+    /// 父进程 pid —— 进程树归并用。
+    /// Splash 1.4 是「python 父进程监听 8000、serve-native 子进程跑推理并吃 27 GB」的结构，
+    /// 只认监听端口的那个 pid 会得到 0.4 GB 的空壳数字。
+    private func ppidOf(_ pid: pid_t) -> pid_t {
+        var info = proc_bsdinfo()
+        let r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.stride))
+        return r > 0 ? pid_t(info.pbi_ppid) : 0
     }
 
     /// 该进程处于 LISTEN 状态的 TCP 端口。
@@ -465,6 +477,7 @@ final class EngineWatcher {
 
             let argv = argvOf(pid)
             let ports = listeningPorts(pid)
+            let ppid = ppidOf(pid)
             var kind = classify(name: pname, path: ppath, argv: argv)
             if kind == nil, let p0 = ports.first, let hint = EngineWatcher.knownEngines[p0],
                interpreters.contains(where: { pname.lowercased().hasPrefix($0) }) {
@@ -475,7 +488,7 @@ final class EngineWatcher {
             // 有监听端口的服务不设内存门槛（权重可能 mmap 在别处，主进程本身可能只有几十 MB）；
             // 没有端口的（GUI 应用 / 库）要求真占着内存，避免把客户端壳子算进来
             if ports.isEmpty && ru.mem < 300 * 1024 * 1024 { continue }
-            procs.append(ModelProc(pid: pid, kind: kind,
+            procs.append(ModelProc(pid: pid, ppid: ppid, kind: kind,
                                    display: modelDisplay(argv: argv, kind: kind),
                                    memBytes: ru.mem, cpuNs: ru.cpuNs,
                                    ports: ports))
@@ -503,6 +516,34 @@ final class EngineWatcher {
             return now.timeIntervalSince(t) <= activeWindow
         }
 
+        // 4.2b 进程树索引：引擎可能是「父进程监听端口、子进程跑推理」的双层结构（Splash 1.4 就是）。
+        //      按端口取到的 holder 只是空壳，内存与计算都在子进程里 ⇒ 整棵树一起算。
+        var ppidMap: [pid_t: pid_t] = [:]
+        var childrenOf: [pid_t: [pid_t]] = [:]
+        for p in procs {
+            ppidMap[p.pid] = p.ppid
+            if p.ppid > 0 { childrenOf[p.ppid, default: []].append(p.pid) }
+        }
+        func treePids(_ pid: pid_t) -> [pid_t] {
+            var out: [pid_t] = [pid]
+            var i = 0
+            while i < out.count, out.count < 64 {
+                out.append(contentsOf: childrenOf[out[i]] ?? [])
+                i += 1
+            }
+            return out
+        }
+        func procMem(_ pid: pid_t) -> UInt64 {
+            if let p = procs.first(where: { $0.pid == pid }) { return p.memBytes }
+            return rusageOf(pid)?.mem ?? 0
+        }
+        func treeMemBytes(_ pid: pid_t) -> UInt64 {
+            treePids(pid).reduce(0) { $0 + procMem($1) }
+        }
+        func treeRunning(_ pid: pid_t) -> Bool {
+            treePids(pid).contains { isRunning($0) }
+        }
+
         // 4.3 端口探测（进程端口 ∪ 已知端口表 ∪ 用户自定义端口）
         var portsToScan = Set(EngineWatcher.knownEngines.keys)
         portsToScan.formUnion(extraPorts)
@@ -523,6 +564,18 @@ final class EngineWatcher {
         var claimed: Set<pid_t> = []
         var pidUse: [pid_t: Int] = [:]
 
+        /// 该进程的祖先是否已被某个端口行认领（内存/活动已在那一行算过，不要再列一遍）
+        func underClaimed(_ pid: pid_t) -> Bool {
+            var cur = pid, hops = 0
+            while hops < 32 {
+                guard let par = ppidMap[cur], par > 0 else { return false }
+                if claimed.contains(par) { return true }
+                cur = par
+                hops += 1
+            }
+            return false
+        }
+
         func append(pid: pid_t?, name: String, mem: UInt64, state: ModelState, note: String) {
             if let p = pid { pidUse[p, default: 0] += 1 }
             snap.rows.append(ModelRow(name: name, memGB: Double(mem) / 1_073_741_824,
@@ -531,8 +584,10 @@ final class EngineWatcher {
 
         for hit in hits {
             let holder = procs.first { $0.ports.contains(hit.port) }
-            let running = holder.map { isRunning($0.pid) } ?? false
-            let memBytes = holder?.memBytes ?? 0
+            // 进程树聚合：Splash 1.4 的权重与计算都在 serve-native 子进程里，父进程只是 HTTP 壳
+            // （只按端口取 holder 会报出 0.41 GB / 挂载待机，而实际是 27 GB 在解码）。
+            let running = holder.map { treeRunning($0.pid) } ?? false
+            let memBytes = holder.map { treeMemBytes($0.pid) } ?? 0
             if let h = holder { claimed.insert(h.pid) }
 
             let engineTag = hit.kind == "本地模型服务" ? "端口 \(hit.port)" : "\(hit.kind) · 端口 \(hit.port)"
@@ -560,6 +615,9 @@ final class EngineWatcher {
         // 4.5 端口没覆盖到的模型进程（应用内模型 / 自定义端口 / 正在退出的旧实例）
         var orphanMem: [pid_t: (bytes: UInt64, count: Int)] = [:]
         for p in procs where !claimed.contains(p.pid) {
+            // 祖先已被某个端口行认领（Splash 的 serve-native 就挂在 python 父进程下）：
+            // 内存与活动已经并进那一行，这里不再重复列出
+            if underClaimed(p.pid) { continue }
             if p.ports.isEmpty,
                let sib = procs.first(where: { $0.pid != p.pid && $0.kind == p.kind && !$0.ports.isEmpty }) {
                 // 引擎重启的过渡态：内存并到服务中的那一行，不重复列
