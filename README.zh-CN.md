@@ -145,6 +145,35 @@ GGUF 的键值对（`general.architecture`、`general.name`、`general.size_labe
 以及**正在运行的引擎自己在 argv 里声明的目录**（`--model-dir` / `--model-path` / `--model`）。
 不做全盘扫描：又慢又越界。
 
+### 不改代码就认新引擎
+
+判定里**纯数据**的那几层放在 `resources/adapters.json`（随应用发布）与
+`~/Library/Application Support/Dockolate/adapters.json`（用户覆盖，格式相同、逐段叠加）：
+
+| 段 | 作用 |
+|---|---|
+| `processHints` | 进程特征词 → 引擎名（外部条目优先于内置 68 条） |
+| `ports` | 端口 → 兜底名（只在进程认不出时用） |
+| `states` | 引擎自报的状态串 → `resident` / `loading` / `failed` / `absent` |
+| `roles` | 特征词 → 角色（草稿头 / 投影 / LoRA / VAE / 文本编码器） |
+| `probePaths` | 诊断与发现报告额外探测的路径 |
+
+```bash
+Dockolate --check-adapters     # 哪几份读到了、多少条目、有没有解析警告
+```
+
+写坏了只警告不崩。所以「引擎换了名字」或「升级后多了一个没见过的状态串」，加几行 JSON 就能认，
+不必等我发新版。
+
+### 发布前自检
+
+```bash
+bash tests/verify_all.sh       # 三套回归 + 干净环境冒烟，产出 tests/last_report.json
+```
+
+「干净环境」＝ 换一个**空的 HOME**（没有模型/配置/缓存）：清单为空、无引擎时探测正常、
+两个窗口仍能渲染出非空白 PNG。它**不**代表已在别人的 macOS 版本与引擎组合上验证过 —— 这条仍是缺口。
+
 ## 自检 / 验收（无需屏幕录制权限）
 
 ```bash

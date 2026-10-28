@@ -1354,6 +1354,30 @@ func payloadShape(_ v: Any, depth: Int = 0) -> String {
     return "\(type(of: v))"
 }
 
+// ---- 自检模式：--check-adapters 打印生效中的签名表（来源 / 条目数 / 解析警告）----
+// 新引擎要「不改代码就认」，就是往 adapters.json 里加数据；这条命令用来确认加对了。
+if CommandLine.arguments.contains("--check-adapters") {
+    let t = AdapterTable.shared
+    print("=== 签名表来源（后者覆盖前者）===")
+    for s in t.sources {
+        print(String(format: "  %@  %@  %d 条目",
+                     s.ok ? "✓" : "✗", s.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
+                     s.entries))
+    }
+    print("=== 生效条目 ===")
+    print("  processHints: \(t.processHints.count) 条（外部条目优先于内置 68 条特征词）")
+    print("  ports:        \(t.ports.count) 条（仅兜底；进程认不出来时才用）")
+    print("  states:       \(t.states.count) 条")
+    print("  roles:        \(t.roles.count) 条")
+    print("  probePaths:   \(t.probePaths.count) 条 \(t.probePaths.isEmpty ? "" : t.probePaths.joined(separator: " "))")
+    if !t.warnings.isEmpty {
+        print("=== 警告（不影响运行，但这些条目被忽略了）===")
+        for w in t.warnings { print("  ⚠ " + w) }
+    }
+    let ok = t.sources.allSatisfy { $0.ok }
+    exit(ok ? 0 : 1)
+}
+
 // ---- 自检模式：--probe=<port> 打印一个端口的探测细节（给用户反馈用，不含取值）----
 // 只输出**形状摘要**（键名 / 类型 / 条数），不输出模型名、路径、任何 key。
 if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
@@ -1362,7 +1386,7 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
     let w = EngineWatcher()
 
     let paths = ["/v1/models", "/api/ps", "/api/tags", "/api/v0/models",
-                 "/sdapi/v1/options", "/queue", "/props", "/health"]
+                 "/sdapi/v1/options", "/queue", "/props", "/health"] + AdapterTable.shared.probePaths
     print("=== 端口 \(port) 各接口 ===")
     for path in paths {
         if let obj = LocalHTTP.json(port: port, path: path) {
@@ -1419,6 +1443,12 @@ if CommandLine.arguments.contains("--inventory") {
         cfg.includeEngineDirs = false
     }
     let w = EngineWatcher()
+    // 与 --engines 同一套参数：回归测试要能把本机真在跑的引擎排除在外
+    if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--ports=") }) {
+        w.extraPorts = a.replacingOccurrences(of: "--ports=", with: "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    }
+    if CommandLine.arguments.contains("--ports-only") { w.portsOnly = true }
     _ = w.refresh()
     Thread.sleep(forTimeInterval: 2.0)
     let runtime = w.refresh()
@@ -1472,7 +1502,7 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--discovery-report
     let snap = w.refresh()
 
     let paths = ["/v1/models", "/api/ps", "/api/tags", "/api/v0/models",
-                 "/sdapi/v1/options", "/queue", "/props", "/health"]
+                 "/sdapi/v1/options", "/queue", "/props", "/health"] + AdapterTable.shared.probePaths
     var ports: [[String: Any]] = []
     for p in snap.scannedPorts {
         guard LocalHTTP.connectable(port: p) else { continue }
