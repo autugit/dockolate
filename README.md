@@ -96,9 +96,10 @@ case where a process cannot be identified; anything else can be declared in
 |---|---|
 | **Ollama** | `GET /api/ps` (running) + `GET /api/tags` (downloaded → "not loaded" list) |
 | **LM Studio** | `GET /api/v0/models`, `state == "loaded"` |
+| **Engines that report per-model state in `GET /v1/models`** (e.g. **mlx-serve**) | per-entry `state` / `loaded` / `bytes_resident` → running / loading / not loaded |
 | **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`, `--model` argv fallback |
 | **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
-| **MLX family: Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`, argv fallback |
+| **MLX family: Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx-serve` / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`, argv fallback |
 | **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` or process fingerprint |
 | **ComfyUI** | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
 | **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
@@ -120,14 +121,29 @@ aggregated over the **whole process tree**, so the row never reports just the pa
 
 Any OpenAI-compatible server on a port you declare is probed the same way.
 
+`GET /v1/models` is consulted **before** the Ollama endpoints whenever its entries carry
+per-model state. Plenty of servers speak a partial Ollama API while keeping real state
+elsewhere, and their `/api/ps` only ever lists *fully resident* models — reading that
+first made a model that was still loading (or one an engine loads on demand) look absent.
+Ollama's own `/v1/models` has no state fields, so Ollama still goes through `/api/ps`.
+
 ### Status meanings
 
 | Label | Meaning |
 |---|---|
 | **running** | process alive, port answering, **and** it computed something in the last 12 s (CPU or GPU time increased) |
 | **loaded-idle** | weights are resident and the port answers, but nothing is computing |
-| **failed** | the process holds a port that no longer answers |
-| **not loaded** | downloaded but not resident (Ollama / LM Studio) — listed separately, holds no RAM |
+| **loading** | the engine reports the weights as loading — they are on their way into memory and it cannot serve requests yet |
+| **failed** | the process holds a port that no longer answers, or the engine reports the model as errored |
+| **unconfirmed** | the engine answered but the payload does not match a known shape, or there is not enough evidence to claim either way — the tooltip says what was observed |
+| **not loaded** | downloaded but not resident — listed separately, holds no RAM |
+
+Detection is **scored, not first-match**: every known shape is collected and the richest answer
+wins (per-model state > resident bytes > disk/quantization fields > a bare id list > an empty
+array), because that is the only way a server that is only half-compatible with another engine's
+API keeps its real state. Any negative conclusion ("nothing is loaded") needs **two independent**
+negatives; with fewer evidence the row is marked *unconfirmed* rather than asserted. Payload
+state strings the app does not know are shown verbatim.
 
 Memory is `ri_phys_footprint` (Activity Monitor's "Memory" column), not RSS:
 RSS can under-report by an order of magnitude for mmap-heavy models
@@ -157,7 +173,15 @@ then shows the engine name and port instead of a model name, and never guesses.
 ./build/Dockolate.app/Contents/MacOS/Dockolate --procs             # top-3 process lists
 ./build/Dockolate.app/Contents/MacOS/Dockolate --engines           # engine probe report
 ./build/Dockolate.app/Contents/MacOS/Dockolate --engines --ports=9000,9001
+./build/Dockolate.app/Contents/MacOS/Dockolate --shot-panel=/tmp/panel.png   # main window → PNG (in-process)
+./build/Dockolate.app/Contents/MacOS/Dockolate --shot-panel=/tmp/panel.png --demo-models
+./build/Dockolate.app/Contents/MacOS/Dockolate --probe=<port>      # payload shapes + candidate scores
+bash tests/verify.sh                                              # regression suite (10 fixtures)
 ```
+
+`--shot-panel` renders the window with `cacheDisplay` inside the process, so it works on
+machines that never granted screen-recording permission; `--demo-models` swaps in a
+snapshot covering running / loading / idle / failed so every state can be reviewed.
 
 ## How it works
 
@@ -201,7 +225,7 @@ the window.
 **How do I see which local AI models are loaded in RAM right now?**
 Open the window. Every identified model server is listed with the memory it
 actually holds (`ri_phys_footprint`, the Activity Monitor figure), tagged
-`running` / `loaded-idle` / `failed` — plus what Ollama or LM Studio have
+`running` / `loaded-idle` / `loading` / `failed` — plus what Ollama or LM Studio have
 downloaded but not loaded.
 
 **Is this a menu bar app or a Dock app?**

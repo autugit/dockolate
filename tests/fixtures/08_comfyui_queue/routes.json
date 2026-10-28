@@ -1,0 +1,15 @@
+{
+  "/queue": {
+    "queue_running": [
+      [
+        0,
+        {
+          "inputs": {
+            "ckpt_name": "acme_sdxl_1.0.safetensors"
+          }
+        }
+      ]
+    ],
+    "queue_pending": []
+  }
+}

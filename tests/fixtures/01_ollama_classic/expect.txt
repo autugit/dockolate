@@ -1,0 +1,4 @@
++acme/chat-7b:q4
++acme/embed-0.6b
++acme/vision-3b:q8
+-没有加载模型

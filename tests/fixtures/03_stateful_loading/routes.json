@@ -1,0 +1,14 @@
+{
+  "/v1/models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "acme/big-8bit",
+        "loaded": false,
+        "state": "loading",
+        "bytes_resident": 0,
+        "bytes_on_disk": 70000000000
+      }
+    ]
+  }
+}

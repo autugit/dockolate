@@ -1,0 +1,5 @@
+{
+  "/sdapi/v1/options": {
+    "sd_model_checkpoint": "juggernautXL_v9.safetensors [31e35c80fc]"
+  }
+}
