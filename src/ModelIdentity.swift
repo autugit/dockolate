@@ -236,6 +236,7 @@ enum ModelIdentifier {
         let lowerDir = dirName.lowercased()
 
         // 目录级角色：ComfyUI 的落盘结构
+        if let r = roleFromTable(lowerDir) { id.role = r }
         if lowerDir.contains("lora") { id.role = .lora }
         if lowerDir == "vae" { id.role = .vae }
         if lowerDir.contains("text_encoder") || lowerDir.contains("text-encoder") { id.role = .textEncoder }
@@ -379,7 +380,30 @@ enum ModelIdentifier {
         return "\(dev.uint64Value):\(ino.uint64Value)"
     }
 
+    /// 外部签名表里的角色词（`roles`）→ ModelRole；认不出的返回 nil 交给内置规则
+    private static func roleFromTable(_ text: String) -> ModelRole? {
+        let roles = AdapterTable.shared.roles
+        guard !roles.isEmpty else { return nil }
+        // 长的词优先，避免 "adapter" 抢走 "vae_adapter" 这类更具体的情况
+        for key in roles.keys.sorted(by: { $0.count > $1.count }) where text.contains(key) {
+            switch (roles[key] ?? "").lowercased() {
+            case "main", "主权重": return .main
+            case "mtp", "草稿头": return .mtp
+            case "projector", "mmproj", "视觉投影": return .projector
+            case "lora", "LoRA": return .lora
+            case "vae", "VAE": return .vae
+            case "textencoder", "text_encoder", "文本编码器": return .textEncoder
+            case "other", "其它": return .other
+            default: continue
+            }
+        }
+        return nil
+    }
+
     static func roleFromName(_ lowerName: String, parent: String) -> ModelRole {
+        // 外部表优先：新部件类型（比如某引擎的 "vision_tower"）加一行 JSON 就认
+        if let r = roleFromTable(lowerName) { return r }
+        if let r = roleFromTable(parent) { return r }
         if lowerName.contains("mmproj") { return .projector }
         if lowerName.contains("mtp") { return .mtp }
         if lowerName.contains("lora") || lowerName.contains("adapter") { return .lora }

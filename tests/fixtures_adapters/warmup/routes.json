@@ -1,0 +1,12 @@
+{
+  "/v1/models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "acme/warm-model",
+        "state": "warmup-x",
+        "bytes_on_disk": 12345678901
+      }
+    ]
+  }
+}

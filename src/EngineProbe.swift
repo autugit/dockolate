@@ -222,6 +222,8 @@ final class EngineWatcher {
     var extraPorts: [Int] = []
     /// 自检用：只探 extraPorts（回归测试要排除本机真在跑的引擎）
     var portsOnly = false
+    /// 外部签名表（内置 resources/adapters.json + 用户覆盖）。纯数据层，新引擎不必等发版。
+    let adapters = AdapterTable.shared
     /// 每个端口的 API key（有些服务——比如 oMLX——无 key 一律 401，拿不到模型名）
     var apiKeys: [Int: String] = [:]
     private var configLoaded = false
@@ -323,6 +325,8 @@ final class EngineWatcher {
         ("piper", "Piper TTS"),
         ("xtts", "XTTS"),
     ]
+    // ⚠️ 外部签名表（resources/adapters.json + 用户覆盖）里的 processHints **优先于**上表，
+    //    所以引擎改名/新增不必等发版；上表只是内置默认值。
     // 快速筛选用：只为「值不值得深扫这个进程」把关，所以只放足够具体的词。
     // 放泛词（swift / exo / wan）会让每 2 秒一次的扫描多跑几十个无关进程的 argv+fd 解析。
     private let quickHints = ["omlx", "splash", "llama", "mlx", "ollama", "lmstudio", "lm studio",
@@ -341,6 +345,7 @@ final class EngineWatcher {
     private func classify(name: String, path: String, argv: [String]) -> String? {
         let head = argv.first ?? ""
         let hay = (name + " " + path + " " + head).lowercased()
+        for (k, v) in adapters.processHints where hay.contains(k) { return v }   // 外部表优先（可覆盖内置）
         for (k, v) in kindHints where hay.contains(k) { return v }
         return nil
     }
@@ -540,7 +545,16 @@ final class EngineWatcher {
     /// 该条目属于哪一档。映射不了返回 nil —— 调用方原样透传，**绝不并进「未加载」**。
     private enum ModelBucket { case resident, loading, failed, absent }
     private func bucketOf(_ raw: String) -> ModelBucket? {
-        switch raw.lowercased() {
+        let key = raw.lowercased()
+        if let b = adapters.states[key] {
+            switch b {
+            case .resident: return .resident
+            case .loading:  return .loading
+            case .failed:   return .failed
+            case .absent:   return .absent
+            }
+        }
+        switch key {
         case "ready", "loaded", "running", "serving", "active": return .resident
         case "loading", "unloading", "warming", "starting": return .loading
         case "error", "failed", "crashed": return .failed
@@ -737,6 +751,7 @@ final class EngineWatcher {
 
             let quick = (pname + " " + ppath).lowercased()
             let suspicious = quickHints.contains { quick.contains($0) }
+                || adapters.processHints.contains { quick.contains($0.keyword) }
                 || interpreters.contains { pname.lowercased().hasPrefix($0) }
             guard suspicious else { continue }
 
@@ -832,7 +847,8 @@ final class EngineWatcher {
         for p in procs { for port in p.ports where kindByPort[port] == nil { kindByPort[port] = p.kind } }
         for port in snap.scannedPorts {
             guard LocalHTTP.connectable(port: port) else { continue }
-            let hint = kindByPort[port] ?? EngineWatcher.knownEngines[port] ?? "本地模型服务"
+            let hint = kindByPort[port] ?? adapters.ports[port]
+                ?? EngineWatcher.knownEngines[port] ?? "本地模型服务"
             if let hit = detectEngine(port: port, hint: hint) {
                 hits.append(hit)
                 snap.enginesFound += 1

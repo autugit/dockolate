@@ -149,6 +149,32 @@ you put in `engines.json`, and **the directories a running engine declared in it
 (`--model-dir` / `--model-path` / `--model`). There is no full-disk scan: it would be slow and none
 of its business.
 
+### Teaching it a new engine without a new release
+
+Detection is split so that everything that is **pure data** can be extended on disk:
+
+`resources/adapters.json` (shipped) and `~/Library/Application Support/Dockolate/adapters.json`
+(override, same schema, merged on top) carry `processHints`, `ports`, `states` (raw engine state
+strings → resident / loading / failed / absent), `roles` (draft head / projector / LoRA / VAE / text
+encoder) and `probePaths`. A malformed file is a warning, never a crash.
+
+```bash
+Dockolate --check-adapters        # which sources loaded, how many entries, any warnings
+```
+
+So a new engine, or a new state string from an upgraded engine, can be supported by adding a few
+lines of JSON — no rebuild, no release.
+
+### Pre-release self-check
+
+```bash
+bash tests/verify_all.sh         # engine + identity/inventory + adapters suites, plus a clean-HOME smoke run
+```
+
+Writes `tests/last_report.json`. The clean-HOME pass proves the app behaves with **no models, no
+config, no cache** (empty inventory, graceful no-engine result, both windows still render). It does
+not stand in for testing on another machine's macOS version or engine mix — that is listed as a gap.
+
 ### Status meanings
 
 | Label | Meaning |

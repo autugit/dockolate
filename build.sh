@@ -21,6 +21,13 @@ swiftc -O -swift-version 5 \
   src/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
+echo "==> 打包签名表资源"
+if [[ -f resources/adapters.json ]]; then
+  cp resources/adapters.json "$APP/Contents/Resources/adapters.json"
+else
+  echo "    ⚠ 缺 resources/adapters.json：应用会只用内置默认判定"
+fi
+
 echo "==> 写 Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,8 +38,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>       <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key>           <string>1.4.0</string>
-    <key>CFBundleShortVersionString</key><string>1.4.0</string>
+    <key>CFBundleVersion</key>           <string>1.5.0</string>
+    <key>CFBundleShortVersionString</key><string>1.5.0</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>LSUIElement</key>               <false/>

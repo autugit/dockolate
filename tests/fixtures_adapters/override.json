@@ -1,0 +1,14 @@
+{
+  "//": "测试用覆盖表：模拟用户给一个「二进制还不认识」的新引擎补数据，不改代码也不发版",
+  "processHints": {
+    "acmeimagined": "Acme Engine"
+  },
+  "states": {
+    "warmup-x": "resident",
+    "draining": "loading"
+  },
+  "roles": {
+    "vision_tower": "projector"
+  },
+  "probePaths": ["/api/v1/status"]
+}
