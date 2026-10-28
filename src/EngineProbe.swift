@@ -26,23 +26,27 @@ import Cocoa
 // ============================================================
 
 enum ModelState {
-    case running, idle, failed, unloaded
+    case running, idle, failed, unloaded, loading, uncertain
 
     var text: String {
         switch self {
-        case .running:  return "正在运行"
-        case .idle:     return "挂载待机"
-        case .failed:   return "出现故障"
-        case .unloaded: return "未加载"
+        case .running:   return "正在运行"
+        case .idle:      return "挂载待机"
+        case .failed:    return "出现故障"
+        case .unloaded:  return "未加载"
+        case .loading:   return "加载中"
+        case .uncertain: return "待确认"
         }
     }
 
     var color: NSColor {
         switch self {
-        case .running:  return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.42, alpha: 1)  // 绿
-        case .idle:     return NSColor(calibratedRed: 0.45, green: 0.66, blue: 0.95, alpha: 1)  // 蓝
-        case .failed:   return NSColor(calibratedRed: 0.95, green: 0.32, blue: 0.28, alpha: 1)  // 红
-        case .unloaded: return .tertiaryLabelColor
+        case .running:   return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.42, alpha: 1)  // 绿
+        case .idle:      return NSColor(calibratedRed: 0.45, green: 0.66, blue: 0.95, alpha: 1)  // 蓝
+        case .failed:    return NSColor(calibratedRed: 0.95, green: 0.32, blue: 0.28, alpha: 1)  // 红
+        case .unloaded:  return .tertiaryLabelColor
+        case .loading:   return NSColor(calibratedRed: 0.95, green: 0.68, blue: 0.25, alpha: 1)  // 琥珀
+        case .uncertain: return NSColor(calibratedRed: 0.62, green: 0.50, blue: 0.88, alpha: 1)  // 紫
         }
     }
 }
@@ -144,6 +148,20 @@ struct EngineHit {
     var port: Int
     var loaded: [String] = []       // 此刻加载 / 正在跑的模型
     var unloaded: [String] = []     // 已下载但没加载（只有 Ollama / LM Studio 给得出）
+    /// 每个已加载模型的常驻字节（服务自己报的，比进程 RSS 更贴「这个模型占多少」）。
+    /// 一个进程能同时驻留多个模型，进程内存在那种情况下是合计，分不出单个。
+    var resident: [String: Int64] = [:]
+    /// 正在加载 / 加载失败的模型（有的服务把加载中的权重也列出来，状态单独给）
+    var loading: [String] = []
+    var failed: [String] = []
+    /// 引擎自报、但我们映射不了的状态（原样显示，见判据 R3）
+    var reported: [String: String] = [:]
+    /// 诊断用：选中的适配器与信息量评分（进发现报告）
+    var adapter: String = ""
+    var score: Int = 0
+    /// 证据不足 / 载荷形状不认识 ⇒ 界面显示「待确认」，不硬下结论（判据 R2 / R6）
+    var uncertain: Bool = false
+    var evidenceNote: String = ""
 }
 
 /// 扫描到的模型服务进程
@@ -196,6 +214,8 @@ final class EngineWatcher {
 
     /// 额外探测端口（用户自定义引擎，来自 engines.json 或 --ports=）
     var extraPorts: [Int] = []
+    /// 自检用：只探 extraPorts（回归测试要排除本机真在跑的引擎）
+    var portsOnly = false
     /// 每个端口的 API key（有些服务——比如 oMLX——无 key 一律 401，拿不到模型名）
     var apiKeys: [Int: String] = [:]
     private var configLoaded = false
@@ -234,6 +254,7 @@ final class EngineWatcher {
         ("flash-next", "Flash-Next"), ("flashnext", "Flash-Next"),
         ("swift-qwen", "Swift-Qwen"), ("swift_qwen", "Swift-Qwen"),
         ("dflash", "DFlash"),                  // 草稿模型偶尔单独起服务
+        ("mlx-serve", "mlx-serve"), ("mlx_serve", "mlx-serve"),   // 必须在泛化的 "mlx" 之前
         ("mlx_lm.server", "MLX"), ("mlx_vlm.server", "MLX"), ("mlx-lm", "MLX"), ("mlx_vlm", "MLX"),
         ("mlx", "MLX"),
 
@@ -452,71 +473,209 @@ final class EngineWatcher {
     }
 
     private func cleanWeightName(_ s: String) -> String {
-        var base = (s as NSString).lastPathComponent
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exts = [".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"]
+        let lower = trimmed.lowercased()
+        // 绝对路径或带权重扩展名 → 取文件名；仓库式 id（org/model、子目录里的模型）保留整段，
+        // 否则会把「a/b」显示成「b」，看着像另一个模型（同一型号的不同量化版本尤其容易撞名）
+        var base = trimmed.hasPrefix("/") || exts.contains(where: { lower.hasSuffix($0) })
+            ? (trimmed as NSString).lastPathComponent
+            : trimmed
         // A1111 会带 " [hash]" 尾巴
         if let r = base.range(of: " [") { base = String(base[..<r.lowerBound]) }
-        for ext in [".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"] where base.hasSuffix(ext) {
-            return String(base.dropLast(ext.count))
-        }
+        for ext in exts where base.lowercased().hasSuffix(ext) { base = String(base.dropLast(ext.count)) }
+        // Ollama 兼容层的默认标签 ":latest" 是噪声；真标签（":8b" 之类）保留
+        if base.hasSuffix(":latest") { base = String(base.dropLast(":latest".count)) }
         return base
     }
 
-    /// 认一个端口：按各家 API 依次试探，第一个解析出结构的算数
-    func detectEngine(port: Int, hint: String) -> EngineHit? {
-        let auth = authHeaders(port)
-        // Ollama（原生 API /api/ps：正在运行的模型）
-        if let ps = LocalHTTP.json(port: port, path: "/api/ps", headers: auth) as? [String: Any],
-           let models = ps["models"] as? [[String: Any]] {
-            let running = models.compactMap { ($0["name"] as? String) ?? ($0["model"] as? String) }
-            var unloaded: [String] = []
-            if let tags = LocalHTTP.json(port: port, path: "/api/tags", headers: auth) as? [String: Any],
-               let all = tags["models"] as? [[String: Any]] {
-                let allNames = all.compactMap { $0["name"] as? String }
-                unloaded = allNames.filter { !running.contains($0) }
-            }
-            return EngineHit(kind: "Ollama", port: port, loaded: running.map(cleanWeightName),
-                             unloaded: unloaded.map(cleanWeightName))
-        }
+    // ---------- 三、端口探测：先收全部候选，再按「载荷说得多清楚」挑一个 ----------
+    // v1.3（R1）：判据是信息量，不是谁先写完。半套 Ollama 兼容层的 `/api/ps` 只回空表，
+    // 却曾因为分支写在前面，把真实状态（/v1/models 里的 ready / loading）整段盖掉。
+    struct ProbeCandidate {
+        var adapter: String                  // 适配器名（诊断与报告用，不参与判定）
+        var score: Int = 0                   // 信息量评分
+        var loaded: [String] = []
+        var unloaded: [String] = []
+        var loading: [String] = []
+        var failed: [String] = []
+        var reported: [String: String] = [:]  // 引擎自报、但我们映射不了的原始状态（原样透传）
+        var resident: [String: Int64] = [:]
+    }
 
-        // LM Studio（/api/v0/models 带 state）
-        if let m = LocalHTTP.json(port: port, path: "/api/v0/models", headers: auth) as? [String: Any],
+    /// 该条目属于哪一档。映射不了返回 nil —— 调用方原样透传，**绝不并进「未加载」**。
+    private enum ModelBucket { case resident, loading, failed, absent }
+    private func bucketOf(_ raw: String) -> ModelBucket? {
+        switch raw.lowercased() {
+        case "ready", "loaded", "running", "serving", "active": return .resident
+        case "loading", "unloading", "warming", "starting": return .loading
+        case "error", "failed", "crashed": return .failed
+        case "unloaded", "idle", "stopped", "absent", "not_loaded", "not-loaded": return .absent
+        default: return nil
+        }
+    }
+
+    /// 信息量评分：只用来排序候选，不参与「加载 / 未加载」的判定。
+    private func infoScore(stateful: Bool, resident: Bool, diskOrQuant: Bool,
+                           count: Int, selfName: Bool) -> Int {
+        (stateful ? 3 : 0) + (resident ? 2 : 0) + (diskOrQuant ? 2 : 0)
+            + (count > 0 ? 1 : 0) + (selfName ? 1 : 0)
+    }
+
+    /// 把每个接口的响应都解析成候选（不做取舍）。**空数组一律 0 分**：
+    /// 它只能证明「这个接口此刻没东西」，不能证明「没有模型」（R2 的基础）。
+    func collectCandidates(port: Int, auth: [String: String]) -> [ProbeCandidate] {
+        var out: [ProbeCandidate] = []
+
+        // ① /v1/models —— OpenAI 兼容；现代引擎还会逐条带状态与常驻字节
+        if let m = LocalHTTP.json(port: port, path: "/v1/models", headers: auth) as? [String: Any],
            let data = m["data"] as? [[String: Any]], !data.isEmpty {
-            var loaded: [String] = [], unloaded: [String] = []
+            var c = ProbeCandidate(adapter: "v1-models")
+            var stateful = false, hasResident = false, hasDiskOrQuant = false, hasSelfName = false
+            var names: [String] = []
             for e in data {
                 guard let id = e["id"] as? String else { continue }
-                let state = (e["state"] as? String) ?? ""
-                if state == "loaded" { loaded.append(id) } else { unloaded.append(id) }
+                let name = cleanWeightName(id)
+                names.append(name)
+                let rawState = e["state"] as? String
+                let flag = e["loaded"] as? Bool
+                let resident = (e["bytes_resident"] as? NSNumber)?.int64Value
+                if rawState != nil || flag != nil { stateful = true }
+                if resident != nil { hasResident = true }
+                if (e["bytes_on_disk"] as? NSNumber) != nil || e["quantization"] != nil { hasDiskOrQuant = true }
+                if (e["owned_by"] as? String) != nil { hasSelfName = true }
+
+                if let raw = rawState {
+                    switch bucketOf(raw) {
+                    case .resident: c.loaded.append(name)
+                                    if let r = resident, r > 0 { c.resident[name] = r }
+                    case .loading:  c.loading.append(name)
+                    case .failed:   c.failed.append(name)
+                    case .absent:   c.unloaded.append(name)
+                    case nil:       c.reported[name] = raw      // 认不出的状态：原样透传（R3）
+                    }
+                } else if (flag ?? ((resident ?? 0) > 0)) {
+                    c.loaded.append(name)
+                    if let r = resident, r > 0 { c.resident[name] = r }
+                } else {
+                    c.unloaded.append(name)
+                }
             }
-            return EngineHit(kind: "LM Studio", port: port,
-                             loaded: loaded.map(cleanWeightName), unloaded: unloaded.map(cleanWeightName))
+            if stateful { c.adapter = "v1-models+state" }
+            // 完全没有状态字段的 OpenAI 兼容服务（llama.cpp / vLLM …）：列出来就是加载着，
+            // 单模型服务本来如此 —— 与 v1.2 的行为保持一致。
+            if !stateful && !hasResident {
+                c.loaded = names
+                c.unloaded = []; c.loading = []; c.failed = []; c.reported = [:]
+            }
+            c.score = infoScore(stateful: stateful, resident: hasResident, diskOrQuant: hasDiskOrQuant,
+                                count: data.count, selfName: hasSelfName)
+            out.append(c)
         }
 
-        // A1111 / Forge / Draw Things（A1111 兼容 API 的 options 里有当前 checkpoint）
+        // ② Ollama /api/ps（在跑）+ /api/tags（已下载）
+        if let ps = LocalHTTP.json(port: port, path: "/api/ps", headers: auth) as? [String: Any],
+           let models = ps["models"] as? [[String: Any]] {
+            var c = ProbeCandidate(adapter: "ollama")
+            c.loaded = models.compactMap { ($0["name"] as? String) ?? ($0["model"] as? String) }
+                .map(cleanWeightName)
+            if let tags = LocalHTTP.json(port: port, path: "/api/tags", headers: auth) as? [String: Any],
+               let all = tags["models"] as? [[String: Any]] {
+                let allNames = all.compactMap { $0["name"] as? String }.map(cleanWeightName)
+                c.unloaded = allNames.filter { !c.loaded.contains($0) }
+            }
+            c.score = c.loaded.isEmpty ? 0
+                : infoScore(stateful: false, resident: false, diskOrQuant: false,
+                            count: c.loaded.count, selfName: !c.unloaded.isEmpty)
+            out.append(c)
+        }
+
+        // ③ LM Studio /api/v0/models
+        if let m = LocalHTTP.json(port: port, path: "/api/v0/models", headers: auth) as? [String: Any],
+           let data = m["data"] as? [[String: Any]], !data.isEmpty {
+            var c = ProbeCandidate(adapter: "lmstudio")
+            var stateful = false
+            for e in data {
+                guard let id = e["id"] as? String else { continue }
+                let name = cleanWeightName(id)
+                let raw = (e["state"] as? String) ?? ""
+                if !raw.isEmpty { stateful = true }
+                if bucketOf(raw) == .resident { c.loaded.append(name) } else { c.unloaded.append(name) }
+            }
+            c.score = infoScore(stateful: stateful, resident: false, diskOrQuant: false,
+                                count: data.count, selfName: false)
+            out.append(c)
+        }
+
+        // ④ A1111 / Forge / Draw Things
         if let opt = LocalHTTP.json(port: port, path: "/sdapi/v1/options", headers: auth) as? [String: Any],
            let ckpt = opt["sd_model_checkpoint"] as? String, !ckpt.isEmpty {
-            return EngineHit(kind: "Stable Diffusion", port: port, loaded: [cleanWeightName(ckpt)])
+            var c = ProbeCandidate(adapter: "sdapi")
+            c.loaded = [cleanWeightName(ckpt)]
+            c.score = infoScore(stateful: false, resident: false, diskOrQuant: true, count: 1, selfName: false)
+            out.append(c)
         }
 
-        // ComfyUI：/queue 结构存在即认它是 ComfyUI，模型名从队列或最近历史里取
+        // ⑤ ComfyUI：/queue 结构存在即认它，模型名从队列或最近历史里取
         if let q = LocalHTTP.json(port: port, path: "/queue", headers: auth) as? [String: Any],
            q["queue_running"] != nil || q["queue_pending"] != nil {
+            var c = ProbeCandidate(adapter: "comfyui")
             var name = firstWeightName(q)
             if name == nil,
                let h = LocalHTTP.json(port: port, path: "/history?max_items=1", headers: auth) {
                 name = firstWeightName(h)
             }
-            return EngineHit(kind: "ComfyUI", port: port,
-                             loaded: name.map { [cleanWeightName($0)] } ?? [])
+            if let n = name { c.loaded = [cleanWeightName(n)] }
+            c.score = infoScore(stateful: false, resident: false, diskOrQuant: true,
+                                count: name == nil ? 0 : 1, selfName: true)
+            out.append(c)
         }
 
-        // OpenAI 兼容兜底（llama.cpp / vLLM / oMLX / MLX / text-generation-webui / KoboldCpp）
-        if let m = LocalHTTP.json(port: port, path: "/v1/models", headers: auth) as? [String: Any],
-           let data = m["data"] as? [[String: Any]], !data.isEmpty {
-            let ids = data.compactMap { $0["id"] as? String }.map(cleanWeightName)
-            return EngineHit(kind: hint, port: port, loaded: ids)
+        return out
+    }
+
+    /// 认一个端口：收全部候选 → 按信息量取最高分（同分保持声明顺序）→ 无候选则返回 nil。
+    func detectEngine(port: Int, hint: String) -> EngineHit? {
+        let auth = authHeaders(port)
+        let cands = collectCandidates(port: port, auth: auth)
+        var best: ProbeCandidate?
+        for c in cands where best == nil || c.score > best!.score { best = c }
+        guard let pick = best else { return nil }
+
+        // R2：任何一个「没在跑什么」的结论，都要两条**互相独立**的负面证据。
+        // 实测：fd 权重句柄不可靠（按需加载、用完释放的引擎加载完一个 sizeof 都不留），
+        // 所以否定判据只用两条协议级证据，不用 fd。
+        var negatives: [String] = []
+        if let v1 = cands.first(where: { $0.adapter.hasPrefix("v1-models") }) {
+            if v1.loaded.isEmpty && v1.loading.isEmpty && v1.reported.isEmpty {
+                negatives.append("/v1/models 无常驻条目")
+            }
+        } else {
+            negatives.append("/v1/models 无结构")
+        }
+        if let oll = cands.first(where: { $0.adapter == "ollama" }) {
+            if oll.loaded.isEmpty { negatives.append("/api/ps 为空") }
+        } else if let lm = cands.first(where: { $0.adapter == "lmstudio" }) {
+            if lm.loaded.isEmpty { negatives.append("/api/v0/models 无 loaded 条目") }
+        } else {
+            negatives.append("Ollama / LM Studio 接口均无应答")
         }
 
-        return nil
+        let nothingRunning = pick.loaded.isEmpty && pick.loading.isEmpty
+            && pick.failed.isEmpty && pick.reported.isEmpty
+        // 证据不足时不下「没有加载模型」的结论，改成「待确认」并把看到的证据写出来。
+        let uncertain = nothingRunning && negatives.count < 2
+
+        var hit = EngineHit(kind: hint, port: port, loaded: pick.loaded, unloaded: pick.unloaded,
+                            resident: pick.resident, loading: pick.loading, failed: pick.failed)
+        hit.reported = pick.reported
+        hit.adapter = pick.adapter
+        hit.score = pick.score
+        hit.uncertain = uncertain
+        hit.evidenceNote = uncertain
+            ? "证据不足，不下结论（\(negatives.isEmpty ? "无负面证据" : negatives.joined(separator: "；"))）"
+            : ""
+        return hit
     }
 
     // ---------- 四、一次完整采样 ----------
@@ -564,6 +723,14 @@ final class EngineWatcher {
                                    display: modelDisplay(argv: argv, kind: kind),
                                    memBytes: ru.mem, cpuNs: ru.cpuNs,
                                    ports: ports))
+        }
+
+        // 4.1b portsOnly（自检用）：把本机真在跑、但不在 extraPorts 里的引擎进程剔掉，
+        // 否则它们会从「端口没覆盖到的进程」那条分支混进结果，污染回归断言。
+        if portsOnly {
+            procs.removeAll { p in
+                !p.ports.isEmpty && p.ports.allSatisfy { !extraPorts.contains($0) }
+            }
         }
 
         // 4.2 活动判定（CPU 或 GPU 时间在涨 ⇒ 正在算）
@@ -617,17 +784,33 @@ final class EngineWatcher {
         }
 
         // 4.3 端口探测（进程端口 ∪ 已知端口表 ∪ 用户自定义端口）
-        var portsToScan = Set(EngineWatcher.knownEngines.keys)
+        // portsOnly（自检用）：只探 extraPorts，把本机真在跑的引擎排除掉，让回归测试的断言只由 fixture 决定。
+        var portsToScan = portsOnly ? Set(extraPorts) : Set(EngineWatcher.knownEngines.keys)
         portsToScan.formUnion(extraPorts)
-        for p in procs { portsToScan.formUnion(p.ports) }
+        if !portsOnly { for p in procs { portsToScan.formUnion(p.ports) } }
         snap.scannedPorts = portsToScan.sorted()
 
         var hits: [EngineHit] = []
+        // 端口 → 进程识别出来的引擎名：端口不在兜底表里、但进程认得（自定义端口很常见）时，
+        // 用进程名给引擎起名，别一律叫「本地模型服务」。
+        var kindByPort: [Int: String] = [:]
+        for p in procs { for port in p.ports where kindByPort[port] == nil { kindByPort[port] = p.kind } }
         for port in snap.scannedPorts {
             guard LocalHTTP.connectable(port: port) else { continue }
-            let hint = EngineWatcher.knownEngines[port] ?? "本地模型服务"
+            let hint = kindByPort[port] ?? EngineWatcher.knownEngines[port] ?? "本地模型服务"
             if let hit = detectEngine(port: port, hint: hint) {
                 hits.append(hit)
+                snap.enginesFound += 1
+            } else if kindByPort[port] != nil || extraPorts.contains(port) {
+                // 端口在应答，但试过的接口没有一个形状认得出来 ⇒ 占一行「待确认」，绝不静默丢弃（R6）。
+                // 只在**有证据说它是模型引擎**时才列：进程认得出来，或用户显式声明了这个端口。
+                // （兜底端口表本身只是猜测 —— 系统服务也会占默认端口，那不该变成一行噪音。）
+                var h = EngineHit(kind: hint, port: port)
+                h.adapter = "unknown"
+                h.uncertain = true
+                h.evidenceNote = "端口在应答，但载荷形状不认识（已试 /v1/models、/api/ps、/api/v0/models、"
+                    + "/sdapi/v1/options、/queue）"
+                hits.append(h)
                 snap.enginesFound += 1
             }
         }
@@ -663,22 +846,54 @@ final class EngineWatcher {
             if let h = holder { claimed.insert(h.pid) }
 
             let engineTag = hit.kind == "本地模型服务" ? "端口 \(hit.port)" : "\(hit.kind) · 端口 \(hit.port)"
-            if hit.loaded.isEmpty {
-                // 引擎活着但没加载任何模型：仍然列出来（用户需要知道它占着端口）
+            if hit.loaded.isEmpty && hit.loading.isEmpty && hit.failed.isEmpty && hit.reported.isEmpty {
+                // 引擎活着但没加载任何模型：仍然列出来（用户需要知道它占着端口）。
+                // 证据不足时显示「待确认」并写明看到什么，不硬说「没有加载模型」（R2）。
                 append(pid: holder?.pid, name: hit.kind, mem: memBytes,
-                       state: running ? .running : .idle,
-                       note: "pid \(holder?.pid ?? 0) · \(engineTag) · 没有加载模型")
+                       state: hit.uncertain ? .uncertain : (running ? .running : .idle),
+                       note: "pid \(holder?.pid ?? 0) · \(engineTag) · "
+                           + (hit.uncertain ? hit.evidenceNote : "没有加载模型"))
             } else {
-                for (i, name) in hit.loaded.enumerated() {
+                var first = true
+                for name in hit.loaded {
+                    // 服务自己报了该模型的常驻字节就用它（同一进程里多模型时，进程内存在这里是合计）
+                    let own = hit.resident[name].map { UInt64($0) }
                     let detail: String
                     if hit.loaded.count > 1 {
-                        detail = "同一进程托管 \(hit.loaded.count) 个模型，内存是合计"
+                        detail = own != nil
+                            ? "同一进程托管 \(hit.loaded.count) 个模型，此处是该模型自己报的常驻字节"
+                            : "同一进程托管 \(hit.loaded.count) 个模型，内存是合计"
                     } else {
                         detail = running ? "正在处理请求" : "权重在内存、无计算"
                     }
-                    append(pid: i == 0 ? holder?.pid : nil, name: name, mem: memBytes,
+                    append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
                            state: running ? .running : .idle,
                            note: "pid \(holder?.pid ?? 0) · \(engineTag) · \(detail)")
+                    first = false
+                }
+                // 加载中：权重正在往内存里搬（大模型要几十秒到几分钟），这时服务还接不了请求，
+                // 但绝不能报成「没有加载模型」—— 那看着就像没识别到这个模型
+                for name in hit.loading {
+                    let own = hit.resident[name].map { UInt64($0) }
+                    append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
+                           state: .loading,
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 权重正在加载，暂不接请求")
+                    first = false
+                }
+                for name in hit.failed {
+                    append(pid: first ? holder?.pid : nil, name: name, mem: 0,
+                           state: .failed,
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 该模型加载失败（服务端日志有原因）")
+                    first = false
+                }
+                // 引擎自报了状态、但我们映射不了：原样显示，不并进「未加载」（R3）
+                for (name, raw) in hit.reported.sorted(by: { $0.key < $1.key }) {
+                    let own = hit.resident[name].map { UInt64($0) }
+                    append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
+                           state: .uncertain,
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 引擎自报状态「\(raw)」，"
+                               + "这个值我们还不认识（原样显示，不当作未加载）")
+                    first = false
                 }
             }
             snap.unloaded.append(contentsOf: hit.unloaded)

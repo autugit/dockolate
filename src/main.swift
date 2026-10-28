@@ -587,6 +587,26 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         timer = t
     }
 
+    // ---- 开发自检：把主窗口离屏渲染成 PNG ----
+    // 本机没有屏幕录制权限（screencapture 直接报 "could not create image from display"），
+    // 所以界面的验收面改成进程内 cacheDisplay —— 不碰 TCC，拿到的是真实像素。
+    // 用法：Dockolate --shot-panel=/tmp/panel.png [--demo-models]
+    /// 自检用：直接注入一份模型快照，覆盖「加载中 / 出现故障」这类现场难碰到的状态
+    func selfCheckInjectModels(_ snap: ModelSnapshot) {
+        cachedModels = snap
+        modelSampledAt = Date()
+    }
+
+    func selfCheckRenderPNG(to path: String) -> Bool {
+        guard let w = window, let v = w.contentView else { return false }
+        refresh()
+        v.layoutSubtreeIfNeeded()
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return false }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        do { try png.write(to: URL(fileURLWithPath: path)); return true } catch { return false }
+    }
+
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
@@ -881,10 +901,44 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         if models.enginesFound == 0 && models.rows.isEmpty {
             footParts.append("没探测到本地引擎")
         }
-        if !models.unloaded.isEmpty { footParts.append("未加载：" + models.unloaded.joined(separator: "、")) }
-        if models.rows.count > modelRowLimit { footParts.append("另有 \(models.rows.count - modelRowLimit) 个未显示") }
-        if models.rows.contains(where: { $0.shared }) { footParts.append("* 同一进程托管多个模型，内存是进程合计") }
+        if models.rows.count > modelRowLimit {
+            let hidden = models.rows.suffix(models.rows.count - modelRowLimit)
+            let hiddenUncertain = hidden.filter { $0.state == .uncertain }.count
+            footParts.append("另有 \(hidden.count) 个未显示"
+                             + (hiddenUncertain > 0 ? "（含 \(hiddenUncertain) 个待确认）" : ""))
+        }
+        if models.rows.contains(where: { $0.shared }) { footParts.append("* 同一进程托管多个模型（单个模型的内存见行内提示）") }
+        // 未加载清单：按脚注实际可用宽度装配，塞不下就收成「等 N 个」。
+        // 之前整串直接拼上，模型名一长就被省略号吃掉（尾部的模型看着像没被识别到）。完整清单进悬停提示。
+        if !models.unloaded.isEmpty {
+            let font = NSFont.systemFont(ofSize: 10.5)
+            func textWidth(_ s: String) -> CGFloat {
+                (s as NSString).size(withAttributes: [.font: font]).width
+            }
+            let othersWidth = footParts.isEmpty ? 0 : textWidth(footParts.joined(separator: "　")) + 21
+            let budget = max(140, 412 - othersWidth)   // 412 = 脚注框宽
+            let names = models.unloaded
+            var text = "未加载："
+            var shown = 0
+            for (i, n) in names.enumerated() {
+                let candidate = i == 0 ? n : "、" + n
+                let suffix = names.count - (i + 1) > 0 ? " 等 \(names.count) 个" : ""
+                guard textWidth(text + candidate + suffix) <= budget else { break }
+                text += candidate
+                shown += 1
+            }
+            let unloadedNote: String
+            if shown == 0 {
+                unloadedNote = "未加载 \(names.count) 个（悬停看全部）"
+            } else if shown < names.count {
+                unloadedNote = text + " 等 \(names.count) 个"
+            } else {
+                unloadedNote = text
+            }
+            footParts.insert(unloadedNote, at: 0)
+        }
         modelFootnote?.stringValue = footParts.joined(separator: "　")
+        modelFootnote?.toolTip = models.unloaded.isEmpty ? nil : models.unloaded.joined(separator: "、")
 
         let cpu = sampler.topCPU()
         let gpu = sampler.topGPU()
@@ -1178,6 +1232,7 @@ if CommandLine.arguments.contains("--engines") || CommandLine.arguments.contains
         ms.extraPorts = a.replacingOccurrences(of: "--ports=", with: "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
+    if CommandLine.arguments.contains("--ports-only") { ms.portsOnly = true }
     _ = ms.refresh()                        // 首拍只建基准
     Thread.sleep(forTimeInterval: 2.0)      // 跨过一个活动窗口
     let snap = ms.refresh()
@@ -1257,6 +1312,106 @@ if CommandLine.arguments.contains("--dump") {
         print("icon=\(url.path)")
     }
     exit(0)
+}
+
+// ---- 自检模式：--probe=<port> 打印一个端口的探测细节（给用户反馈用，不含取值）----
+// 只输出**形状摘要**（键名 / 类型 / 条数），不输出模型名、路径、任何 key。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
+    let port = Int(a.replacingOccurrences(of: "--probe=", with: "")) ?? 0
+    guard port > 0 else { print("用法：--probe=<端口>"); exit(2) }
+    let w = EngineWatcher()
+
+    func shape(_ v: Any, depth: Int = 0) -> String {
+        if depth > 4 { return "…" }
+        if let d = v as? [String: Any] {
+            let keys = d.keys.sorted().prefix(12).map { "\($0):\(shape(d[$0]!, depth: depth + 1))" }
+            return "{" + keys.joined(separator: ", ") + (d.count > 12 ? ", …\(d.count - 12) 键" : "") + "}"
+        }
+        if let arr = v as? [Any] {
+            return "[" + "\(arr.count) 条" + (arr.isEmpty ? "" : " × " + shape(arr[0], depth: depth + 1)) + "]"
+        }
+        if v is String { return "String" }
+        if v is NSNumber { return "Number" }
+        if v is NSNull { return "null" }
+        return "\(type(of: v))"
+    }
+
+    let paths = ["/v1/models", "/api/ps", "/api/tags", "/api/v0/models",
+                 "/sdapi/v1/options", "/queue", "/props", "/health"]
+    print("=== 端口 \(port) 各接口 ===")
+    for path in paths {
+        if let obj = LocalHTTP.json(port: port, path: path) {
+            print("  \(path)  有 JSON  \(shape(obj))")
+        } else {
+            print("  \(path)  无应答 / 不是 JSON")
+        }
+    }
+    let cands = w.collectCandidates(port: port, auth: [:])
+    print("=== 候选（按信息量评分）===")
+    if cands.isEmpty { print("  （一个形状都没认出来）") }
+    for c in cands.sorted(by: { $0.score > $1.score }) {
+        print("  \(c.adapter)  分=\(c.score)  常驻=\(c.loaded.count)  加载中=\(c.loading.count)  "
+              + "故障=\(c.failed.count)  未加载=\(c.unloaded.count)  未映射状态=\(c.reported.count)")
+    }
+    if let hit = w.detectEngine(port: port, hint: "探测") {
+        print("=== 选中 ===")
+        print("  适配器=\(hit.adapter)  分=\(hit.score)  待确认=\(hit.uncertain)  \(hit.evidenceNote)")
+    } else {
+        print("=== 选中：无（会在界面占一行「待确认」）===")
+    }
+    exit(0)
+}
+
+// ---- 自检模式：--shot-panel=<path> 把主窗口离屏渲染成 PNG ----
+// 没有屏幕录制权限时（screencapture 报 could not create image from display），
+// 这是唯一能「看到」界面的验收面：进程内 cacheDisplay，像素来自真实视图树。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-panel=") }) {
+    _ = NSApplication.shared
+    let out = a.replacingOccurrences(of: "--shot-panel=", with: "")
+    let cpuS = CPUSampler()
+    let memS = MemorySampler()
+    let gpuS = GPUSampler()
+    _ = cpuS.next()                      // 建基准
+    gpuS.prime()
+    Thread.sleep(forTimeInterval: 2.2)   // 跨过 GPU 的 2s 采样间隔
+
+    var s = Sample()
+    s.cpu = cpuS.next() ?? 0
+    s.gpu = gpuS.next()
+    let mem = memS.next()
+    let d = memS.last
+    s.memPct = mem.pct; s.memUsedGB = mem.usedGB; s.memTotalGB = mem.totalGB
+    s.memAppGB = d.appGB; s.memWiredGB = d.wiredGB; s.memCompressedGB = d.compressedGB
+    s.memCachedGB = d.cachedGB; s.memFreeGB = d.freeGB
+    s.swapUsedGB = swapUsedGB()
+    s.memPressurePct = d.totalGB > 0 ? min(100, (d.compressedGB + s.swapUsedGB) / d.totalGB * 100) : 0
+
+    let fixed = s
+    let ctl = ProcessWindowController()
+    ctl.sampleProvider = { fixed }
+    ctl.show()
+    // 引擎探测走后台队列 + 回主队列：主队列必须有 runloop 运行才会执行，sleep 不行
+    RunLoop.main.run(until: Date().addingTimeInterval(3.0))
+    // --demo-models：注入覆盖全状态的快照（加载中 / 故障 现场很难正好撞上），用于验收配色与文案
+    if CommandLine.arguments.contains("--demo-models") {
+        var demo = ModelSnapshot()
+        demo.enginesFound = 1
+        demo.rows = [
+            ModelRow(name: "Some-New-Video-Model-8bit", memGB: 28.06, state: .running,
+                     note: "引擎 A · 正在处理请求"),
+            ModelRow(name: "org/Another-New-Weight-Q5", memGB: 12.30, state: .loading,
+                     note: "引擎 A · 权重正在加载，暂不接请求"),
+            ModelRow(name: "Unmapped-State-Model", memGB: 0, state: .uncertain,
+                     note: "引擎 A · 引擎自报状态「warmup-x」，这个值还不认识"),
+            ModelRow(name: "Broken-Weight", memGB: 0, state: .failed,
+                     note: "引擎 A · 该模型加载失败（服务端日志有原因）"),
+        ]
+        demo.unloaded = ["Unused-Weight-A", "Unused-Weight-B", "Unused-Weight-C", "Unused-Weight-D"]
+        ctl.selfCheckInjectModels(demo)
+    }
+    let ok = ctl.selfCheckRenderPNG(to: out)
+    print(ok ? "panel=\(out)" : "panel=失败（窗口没建起来？）")
+    exit(ok ? 0 : 1)
 }
 
 // 单实例：用**文件锁**，不用 pid 比较。

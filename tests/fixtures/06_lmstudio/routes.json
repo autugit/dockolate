@@ -1,0 +1,14 @@
+{
+  "/api/v0/models": {
+    "data": [
+      {
+        "id": "acme/lm-8b",
+        "state": "loaded"
+      },
+      {
+        "id": "acme/lm-4b",
+        "state": "not-loaded"
+      }
+    ]
+  }
+}

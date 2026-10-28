@@ -63,9 +63,10 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 |---|---|
 | **Ollama** | `GET /api/ps`（在跑）+ `GET /api/tags`（已下载 → 未加载清单） |
 | **LM Studio** | `GET /api/v0/models` 的 `state == "loaded"` |
+| **在 `GET /v1/models` 里逐条报状态的引擎**（如 **mlx-serve**） | 取 `state` / `loaded` / `bytes_resident` → 正在运行 / 加载中 / 未加载 |
 | **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`，取不到再从 `--model` 参数抠 |
 | **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
-| **MLX 系：Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`，取不到再从 argv 抠 |
+| **MLX 系：Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx-serve` / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`，取不到再从 argv 抠 |
 | **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` 或进程指纹 |
 | **ComfyUI** | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
 | **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
@@ -82,8 +83,20 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 `serve-native` 子进程几十 GB）。内存与「是否在算」按**整棵进程树**聚合，不会只报父进程那几十 MB。
 
 状态口径：**正在运行** = 端口在应答且最近 12 秒内真算过东西（CPU 或 GPU 时间在涨）；
-**挂载待机** = 权重在内存、端口在应答、没在算；**出现故障** = 进程占着端口但端口不应答；
-**未加载** = 已下载未常驻（只有 Ollama / LM Studio 提供这个信息），单独列出、不占内存。
+**挂载待机** = 权重在内存、端口在应答、没在算；**加载中** = 引擎自报权重正在往内存里搬，
+这时还接不了请求；**出现故障** = 进程占着端口但端口不应答，或引擎自报该模型出错；
+**未加载** = 已下载未常驻，单独列出、不占内存；
+**待确认** = 引擎在应答但载荷形状不认识，或证据不足以判断（tooltip 写明看到了什么）。
+
+判定是**打分制，不是先到先得**：先把每个已知形状都收下来，谁的信息量大谁说了算
+（逐条状态 > 常驻字节 > 磁盘/量化字段 > 只有 id 列表 > 空数组）。
+任何「没有加载模型」的结论都要**两条互相独立的负面证据**；不足两条就标「待确认」，
+不硬下结论。引擎自报但本程序不认识的状态字符串**原样显示**。
+
+`GET /v1/models` 里的条目带逐条状态时，**先读它**，再考虑 Ollama 的接口。
+不少服务只兼容了半套 Ollama API，而它的 `/api/ps` 只列**完全常驻**的模型 ——
+先读那一路，会把「正在加载」和「引擎按需加载、还没加载」的模型报成不存在
+（引擎名也会认错）。Ollama 自己的 `/v1/models` 没有状态字段，照旧走 `/api/ps`。
 
 需要鉴权的引擎（比如 oMLX 无 key 一律 401）拿不到模型名时只显示引擎名 + 端口，不猜。
 配置 `~/Library/Application Support/Dockolate/engines.json`：
@@ -123,7 +136,16 @@ $BIN --dump --out=/tmp                        # 采样一次并导出图标 PNG
 $BIN --dump --verbose --out=/tmp              # 附带内存去向与 Z 的分解
 $BIN --dump --mock=8,16,35,88 --out=/tmp      # 强制 C/G/M/Z 四个水位，验四种颜色
 $BIN --procs                                  # 打印三个进程榜（窗口的数据源）
+$BIN --engines                                # 引擎探测报告（模型名 / 状态 / 内存）
+$BIN --engines --ports=9000,9001              # 额外探测自定义端口
+$BIN --shot-panel=/tmp/panel.png              # 主窗口离屏渲染成 PNG（进程内 cacheDisplay）
+$BIN --shot-panel=/tmp/panel.png --demo-models # 注入「运行/加载中/待确认/故障」四态快照，验收配色与文案
+$BIN --probe=<端口>                            # 打印各接口的载荷形状 + 候选评分 + 选中的适配器（可贴进反馈）
+bash tests/verify.sh                           # 回归测试：10 个假引擎 fixture、28 条断言
 ```
+
+`--shot-panel` 不需要屏幕录制权限（本机 `screencapture` 直接报
+`could not create image from display`），界面验收一律走它。
 
 ## 数据口径
 

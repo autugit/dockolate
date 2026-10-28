@@ -1,0 +1,29 @@
+{
+  "/api/ps": {
+    "models": []
+  },
+  "/api/tags": {
+    "models": [
+      {
+        "name": "acme/video-8bit:latest"
+      },
+      {
+        "name": "acme/chat-4b:latest"
+      }
+    ]
+  },
+  "/v1/models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "acme/video-8bit",
+        "object": "model",
+        "owned_by": "svc",
+        "loaded": true,
+        "state": "ready",
+        "bytes_resident": 10000000000,
+        "bytes_on_disk": 70000000000
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "/api/ps": {
+    "models": [
+      {
+        "name": "acme/chat-7b:q4",
+        "model": "acme/chat-7b:q4"
+      },
+      {
+        "name": "acme/embed-0.6b:latest",
+        "model": "acme/embed-0.6b:latest"
+      }
+    ]
+  },
+  "/api/tags": {
+    "models": [
+      {
+        "name": "acme/chat-7b:q4"
+      },
+      {
+        "name": "acme/embed-0.6b:latest"
+      },
+      {
+        "name": "acme/vision-3b:q8"
+      }
+    ]
+  }
+}
