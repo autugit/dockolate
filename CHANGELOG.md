@@ -6,6 +6,44 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-28
+
+### Added — 签名表外置：新引擎不必等发版（方案 M4）
+
+The parts of detection that are **pure data** now live in `resources/adapters.json`
+(inside the bundle) and can be extended without rebuilding the app:
+
+| 段 | 作用 |
+|---|---|
+| `processHints` | 进程特征词 → 引擎显示名（外部条目优先于内置 68 条） |
+| `ports` | 端口 → 兜底显示名（只在进程认不出来时用） |
+| `states` | 引擎自报的状态串 → `resident` / `loading` / `failed` / `absent` |
+| `roles` | 文件名/目录特征词 → 角色（草稿头 / 投影 / LoRA / VAE / 文本编码器） |
+| `probePaths` | 诊断与发现报告里额外探测的路径 |
+
+叠加顺序：内置 → `~/Library/Application Support/Dockolate/adapters.json`（用户覆盖）
+→ `DOCKOLATE_ADAPTERS=<path>`（排障/测试）。**解析失败只警告、不致命**：坏 JSON 不会让应用起不来。
+
+`--check-adapters` 打印每份来源是否读到、条目数与解析警告——加完数据用它确认加对了。
+
+### Added — 发布前自检矩阵
+
+```bash
+bash tests/verify_all.sh        # 三套回归 + 一趟「干净环境」冒烟，产出 tests/last_report.json
+```
+
+- 三套回归：引擎探测（28 条断言 / 10 fixture）、身份+清单（15 条）、签名表外置（14 条）；
+- 「干净环境」= 换一个**空的 HOME**（没有模型、没有配置、没有缓存）：清单为空、无引擎时探测正常返回、
+  两个窗口仍能渲染出非空白 PNG、发现报告是合法 JSON；
+- 结果写成 `tests/last_report.json`，可直接附在 Release 里。
+
+### Added — 签名表回归（关键一条）
+
+`tests/verify_adapters.sh` 端到端验证「不改代码就认新东西」：
+同一台假引擎、同一个二进制，仅靠一份 JSON，就把一个二进制**没见过**的状态串（`warmup-x`）
+从「待确认」变成正常显示；再用一个名字本身就是特征词的假引擎二进制，验证进程指纹命名。
+坏 JSON 也覆盖：只警告、返回非 0、引擎探测照常。
+
 ## [1.4.0] — 2026-10-28
 
 ### Added — 身份层：这是哪个版本，不再靠名字猜（方案 M2）

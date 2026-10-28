@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "//": "纯数据层：这些条目改变判定，不需要改代码。用户覆盖放 ~/Library/Application Support/Dockolate/adapters.json，格式相同、逐段叠加，用户条目优先。",
+  "processHints": {},
+  "ports": {},
+  "states": {
+    "ready": "resident",
+    "loaded": "resident",
+    "running": "resident",
+    "serving": "resident",
+    "active": "resident",
+    "loading": "loading",
+    "unloading": "loading",
+    "warming": "loading",
+    "starting": "loading",
+    "error": "failed",
+    "failed": "failed",
+    "crashed": "failed",
+    "unloaded": "absent",
+    "idle": "absent",
+    "stopped": "absent",
+    "absent": "absent",
+    "not_loaded": "absent",
+    "not-loaded": "absent"
+  },
+  "roles": {
+    "mmproj": "projector",
+    "mtp": "mtp",
+    "lora": "lora",
+    "adapter": "lora",
+    "vae": "vae",
+    "text_encoder": "textEncoder",
+    "text-encoder": "textEncoder"
+  },
+  "probePaths": []
+}

@@ -1,0 +1,9 @@
+{
+  "/v1/models": {
+    "object": "list",
+    "data": []
+  },
+  "/api/ps": {
+    "models": []
+  }
+}
