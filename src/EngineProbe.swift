@@ -26,7 +26,7 @@ import Cocoa
 // ============================================================
 
 enum ModelState {
-    case running, idle, failed, unloaded, loading, uncertain
+    case running, idle, failed, unloaded, loading, uncertain, unregistered
 
     var text: String {
         switch self {
@@ -36,6 +36,7 @@ enum ModelState {
         case .unloaded:  return "未加载"
         case .loading:   return "加载中"
         case .uncertain: return "待确认"
+        case .unregistered: return "在盘未登记"
         }
     }
 
@@ -47,6 +48,7 @@ enum ModelState {
         case .unloaded:  return .tertiaryLabelColor
         case .loading:   return NSColor(calibratedRed: 0.95, green: 0.68, blue: 0.25, alpha: 1)  // 琥珀
         case .uncertain: return NSColor(calibratedRed: 0.62, green: 0.50, blue: 0.88, alpha: 1)  // 紫
+        case .unregistered: return .secondaryLabelColor
         }
     }
 }
@@ -65,6 +67,9 @@ struct ModelSnapshot {
     var unloaded: [String] = []      // 已下载但没加载（只有 Ollama / LM Studio 提供这个信息）
     var enginesFound = 0             // 探测到几个活着的引擎端口
     var scannedPorts: [Int] = []
+    /// 引擎自己声明的权重目录（argv 里的 --model-dir / --model-path / --model 的目录部分）。
+    /// 清单层拿它当扫描根 —— 「引擎从哪儿加载，就去哪儿清点」，比猜用户目录可靠。
+    var modelDirs: [String] = []
 }
 
 // ============================================================
@@ -174,6 +179,7 @@ struct ModelProc {
     var memBytes: UInt64
     var cpuNs: UInt64
     var ports: [Int]
+    var modelDirs: [String] = []   // argv 里声明的权重目录（清单层扫描根）
 }
 
 final class EngineWatcher {
@@ -337,6 +343,34 @@ final class EngineWatcher {
         let hay = (name + " " + path + " " + head).lowercased()
         for (k, v) in kindHints where hay.contains(k) { return v }
         return nil
+    }
+
+    /// argv 里声明的权重目录：`--model-dir X` / `--model-path X` / `--model X`
+    /// 只收「看起来是目录」的（存在且是目录，或是绝对路径）—— 避免把仓库 id 当路径。
+    private func modelDirsFromArgv(_ argv: [String]) -> [String] {
+        let flags = ["--model-dir", "--model-path", "--model", "-m", "--models", "--model_dir"]
+        var out: [String] = []
+        func consider(_ v: String) {
+            guard !v.hasPrefix("-") else { return }
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: v, isDirectory: &isDir), isDir.boolValue {
+                out.append((v as NSString).standardizingPath)
+            } else if v.hasPrefix("/") {
+                // 可能是目录本身或目录下的某个文件：取父目录再确认一次
+                let parent = (v as NSString).deletingLastPathComponent
+                var d: ObjCBool = false
+                if FileManager.default.fileExists(atPath: parent, isDirectory: &d), d.boolValue {
+                    out.append(parent)
+                }
+            }
+        }
+        for (i, a) in argv.enumerated() {
+            if flags.contains(a), i + 1 < argv.count { consider(argv[i + 1]) }
+            for f in flags where a.hasPrefix(f + "=") {
+                consider(String(a.dropFirst(f.count + 1)))
+            }
+        }
+        return out
     }
 
     /// 模型名：优先 argv 里的 --model / -m 等；不够再退回引擎名
@@ -722,7 +756,8 @@ final class EngineWatcher {
             procs.append(ModelProc(pid: pid, ppid: ppid, kind: kind,
                                    display: modelDisplay(argv: argv, kind: kind),
                                    memBytes: ru.mem, cpuNs: ru.cpuNs,
-                                   ports: ports))
+                                   ports: ports,
+                                   modelDirs: modelDirsFromArgv(argv)))
         }
 
         // 4.1b portsOnly（自检用）：把本机真在跑、但不在 extraPorts 里的引擎进程剔掉，
@@ -928,6 +963,11 @@ final class EngineWatcher {
             }
             append(pid: p.pid, name: p.display, mem: p.memBytes, state: state, note: note)
         }
+
+        // 4.5b 引擎声明的权重目录（清单层要用）
+        var dirSet = Set<String>()
+        for p in procs { for d in p.modelDirs { dirSet.insert(d) } }
+        snap.modelDirs = dirSet.sorted()
 
         // 4.6 收尾：退出中实例的内存并回在服务的那一行；排序；共享标记
         for (pid, extra) in orphanMem {

@@ -127,6 +127,24 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 ./build.sh          # 产物：build/Dockolate.app
 ```
 
+### 这是哪个版本？看文件头，不看文件名
+
+同一家族的 4bit / 8bit / IQ3 / IQ4，各引擎的命名习惯都不一样。Dockolate 对每个能找到的权重目录读**文件头**：
+GGUF 的键值对（`general.architecture`、`general.name`、`general.size_label`）、safetensors 的 JSON 头、
+`config.json` 的 `architectures` 与 `quantization{bits, group_size}`。靠这个把**同一家族的不同量化**分开，
+并分辨**主权重 / 草稿头（MTP）/ 视觉投影（mmproj）/ LoRA / VAE / 文本编码器**。
+
+在盘字节按 **inode** 去重：硬链接副本与 HF 快照里指向 `blobs/` 的符号链接只算一次。
+
+### 盘上有、但没有任何引擎登记的权重
+
+「引擎在跑什么」不等于「你机器上有什么」。**本机模型清单**窗口（菜单 ⌘I）把三路对起来 ——
+引擎自报、文件头写的、盘上目录 —— 并把**没有引擎登记**的权重单列成「在盘未登记」。
+
+扫描范围：已知仓库（HF 缓存 / Ollama / LM Studio / ComfyUI 模型目录）、`engines.json` 里的 `modelDirs`，
+以及**正在运行的引擎自己在 argv 里声明的目录**（`--model-dir` / `--model-path` / `--model`）。
+不做全盘扫描：又慢又越界。
+
 ## 自检 / 验收（无需屏幕录制权限）
 
 ```bash
@@ -141,7 +159,11 @@ $BIN --engines --ports=9000,9001              # 额外探测自定义端口
 $BIN --shot-panel=/tmp/panel.png              # 主窗口离屏渲染成 PNG（进程内 cacheDisplay）
 $BIN --shot-panel=/tmp/panel.png --demo-models # 注入「运行/加载中/待确认/故障」四态快照，验收配色与文案
 $BIN --probe=<端口>                            # 打印各接口的载荷形状 + 候选评分 + 选中的适配器（可贴进反馈）
-bash tests/verify.sh                           # 回归测试：10 个假引擎 fixture、28 条断言
+$BIN --identify=<路径>                         # 这个权重目录/文件到底是什么（家族/量化/角色/字节）
+$BIN --inventory [--json] [--dirs=a:b]         # 磁盘清单（运行时 + 在盘未登记）
+$BIN --shot-inventory=/tmp/inv.png             # 清单窗口离屏渲染（可加 --demo-inventory）
+$BIN --discovery-report=/tmp/report.json       # 脱敏发现报告（无模型名/路径/pid/key）
+bash tests/verify.sh && bash tests/verify_identity.sh   # 两套回归：引擎探测 + 身份/清单
 ```
 
 `--shot-panel` 不需要屏幕录制权限（本机 `screencapture` 直接报

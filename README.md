@@ -127,6 +127,28 @@ elsewhere, and their `/api/ps` only ever lists *fully resident* models — readi
 first made a model that was still loading (or one an engine loads on demand) look absent.
 Ollama's own `/v1/models` has no state fields, so Ollama still goes through `/api/ps`.
 
+### Which version is this, really?
+
+Names lie, headers do not. For every weight tree it can find, Dockolate reads the header:
+GGUF key/value pairs (`general.architecture`, `general.name`, `general.size_label`), the
+safetensors JSON header, and `config.json` (`architectures`, `quantization{bits, group_size}`).
+That is how it separates **quantizations of the same family** and tells a **main weight** from a
+**draft head (MTP)**, a **vision projector (mmproj)**, a **LoRA**, a **VAE** and a **text encoder**.
+
+Disk usage is de-duplicated by **inode**, so hard-linked copies and Hugging Face snapshot symlinks
+count once.
+
+### What is on disk but not loaded
+
+A registry of what is running is not a registry of what you have. The **本机模型清单** window
+(menu ⌘I) reconciles three sources — what each engine reports, what the headers say, and what is on
+disk — and lists weights **no engine has registered** as 在盘未登记.
+
+It scans known stores (Hugging Face cache, Ollama, LM Studio, ComfyUI model directories), whatever
+you put in `engines.json`, and **the directories a running engine declared in its own argv**
+(`--model-dir` / `--model-path` / `--model`). There is no full-disk scan: it would be slow and none
+of its business.
+
 ### Status meanings
 
 | Label | Meaning |
@@ -176,7 +198,11 @@ then shows the engine name and port instead of a model name, and never guesses.
 ./build/Dockolate.app/Contents/MacOS/Dockolate --shot-panel=/tmp/panel.png   # main window → PNG (in-process)
 ./build/Dockolate.app/Contents/MacOS/Dockolate --shot-panel=/tmp/panel.png --demo-models
 ./build/Dockolate.app/Contents/MacOS/Dockolate --probe=<port>      # payload shapes + candidate scores
-bash tests/verify.sh                                              # regression suite (10 fixtures)
+./build/Dockolate.app/Contents/MacOS/Dockolate --identify=<path>   # what a weight tree actually is
+./build/Dockolate.app/Contents/MacOS/Dockolate --inventory [--json] [--dirs=a:b]
+./build/Dockolate.app/Contents/MacOS/Dockolate --shot-inventory=/tmp/inv.png [--demo-inventory]
+./build/Dockolate.app/Contents/MacOS/Dockolate --discovery-report=/tmp/report.json   # redacted
+bash tests/verify.sh && bash tests/verify_identity.sh              # regression suites
 ```
 
 `--shot-panel` renders the window with `cacheDisplay` inside the process, so it works on

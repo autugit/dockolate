@@ -6,6 +6,51 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-28
+
+### Added — 身份层：这是哪个版本，不再靠名字猜（方案 M2）
+
+- Reads the **file header**, not the file name: GGUF header KV (`general.architecture`,
+  `general.name`, `general.size_label`), the safetensors JSON header, and `config.json`
+  (`architectures` / `model_type` / `quantization{bits, group_size, mode}`).
+- Distinguishes **role**: 主权重 / 草稿头（MTP）/ 视觉投影（mmproj）/ LoRA / VAE / 文本编码器 —
+  from the GGUF architecture suffix, the file name, or the ComfyUI-style parent directory.
+- Dedupe by **inode**, not by path: hard-linked copies of the same bytes (and HF snapshot
+  symlinks into `blobs/`) collapse into one row, so the disk totals stop double-counting.
+- A directory that holds only draft heads / projectors and has subdirectories is treated as a
+  **container**, not a model — that is what turned "a folder of loose gguf files" into fake models.
+
+### Added — 清单层：盘上有哪些版本，看得见（方案 M3）
+
+- Scans **known stores only** (Hugging Face cache, Ollama manifests, LM Studio, ComfyUI model
+  directories) plus `modelDirs` from `engines.json` plus **the directories a running engine
+  declared in its own argv** (`--model-dir` / `--model-path` / `--model`) — "where the engine
+  loads from" is better evidence than guessing a user's folder.
+- Reconciles three sources (engine-reported id × header identity × disk directory) by score, so
+  a running 8-bit model is linked to its 8-bit directory and not to the 4-bit sibling.
+- New rows for weights **no engine has registered** (state 在盘未登记), plus a new
+  **本机模型清单** window (menu ⌘I) that lists everything with quantization, role, disk and memory.
+- Only counts a directory as a model when there is positive evidence (config.json, real GGUF
+  header, or safetensors); a lone `.bin` pack is not a model.
+
+### Added — 诊断
+
+- `--identify=<path>` prints one weight tree's identity.
+- `--inventory [--json] [--dirs=a:b] [--no-defaults]` prints the reconciled list.
+- `--shot-inventory=<png> [--demo-inventory]` renders the new window in-process (no screen
+  recording permission needed).
+- `--discovery-report=<file>` exports a **redacted** JSON (payload shapes, candidate scores, chosen
+  adapter, counts) — no model names, no paths, no pids, no keys.
+- `tests/verify_identity.sh` + `tests/make_fixture_tree.py`: 15 assertions over a synthetic weight
+  tree (MLX dir with `quantization`, GGUF with a real header, draft head, hard-link duplicate,
+  empty shell, VAE role).
+
+### Fixed — 截图验收与系统外观解耦
+
+- The in-process window capture now paints the window background inside the bitmap's own graphics
+  context. In dark mode the previous code produced white text on a transparent (→ white) buffer,
+  i.e. an apparently blank window.
+
 ## [1.3.0] — 2026-10-28
 
 ### Changed — detection is scored, not first-match (plan M0 in `docs/引擎发现_方案v1.md`)
