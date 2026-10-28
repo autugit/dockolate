@@ -1,0 +1,19 @@
+{
+  "/v1/models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "acme/a-7b",
+        "object": "model"
+      },
+      {
+        "id": "acme/b-7b",
+        "object": "model"
+      },
+      {
+        "id": "acme/c-7b",
+        "object": "model"
+      }
+    ]
+  }
+}

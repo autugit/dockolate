@@ -6,6 +6,75 @@ All notable changes to Dockolate are documented here. Format follows
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-28
+
+### Changed — detection is scored, not first-match (plan M0 in `docs/引擎发现_方案v1.md`)
+
+- Every known shape is collected first and the answer is chosen by **how much the payload
+  actually says** (per-model state > resident bytes > disk/quant fields > a bare id list >
+  an empty array). Previously the first branch that parsed won — that is exactly how a
+  half-Ollama-compatible server with a rich `/v1/models` had its state ignored.
+- A "nothing is loaded" conclusion now needs **two independent negatives** (`/v1/models`
+  reporting nothing resident *and* `/api/ps` being empty). With fewer, the row reads
+  **待确认 / unconfirmed** and the tooltip names what was observed instead of asserting a negative.
+- State strings the app does not recognise are shown **verbatim**
+  (「引擎自报状态 "warmup-x"」) instead of being folded into "not loaded".
+- A port that answers but whose payload matches no known shape now gets an
+  **unconfirmed** row rather than vanishing — only when there is evidence it is a model engine
+  (process identified by fingerprint, or the port declared by the user), so macOS system
+  services sitting on default ports do not turn into noise.
+
+### Added — regression suite and diagnostics
+
+- `tests/verify.sh` + `tests/fixtures/*`: ten recorded payload shapes (Ollama classic, the
+  empty-`/api/ps`-but-stateful regression, loading, unknown state, ids-only, LM Studio, A1111,
+  ComfyUI, unrecognised shape, all-empty), 28 assertions, run against `--engines`.
+- `--probe=<port>` prints every probed path, the payload **shape** (keys / types / counts —
+  never values), every candidate with its score, and the chosen adapter: safe to paste into a
+  bug report.
+- `--engines --ports-only` restricts scanning to the declared ports (used by the suite).
+- The model-row footnote now counts hidden **unconfirmed** rows when the four-row limit pushes
+  them off the list.
+
+## [1.2.0] — 2026-10-28
+
+### Fixed — engines that report per-model state were read from the wrong endpoint
+
+- The Ollama probe (`GET /api/ps`) ran first and claimed any server that also speaks
+  the Ollama API. Such a server (e.g. **mlx-serve**) lists only *fully resident* models
+  there, so a model that was still loading — or an engine that loads weights on demand —
+  showed as "no model loaded" while every weight on disk was dumped into the
+  "not loaded" list. The engine itself was also mislabelled.
+- `GET /v1/models` is now read **first** when its entries carry per-model state
+  (`state` / `loaded` / `bytes_resident`), and `loading` / `error` are reported as such.
+  Only when those fields are absent does detection fall through to the Ollama /
+  LM Studio / OpenAI-compatible branches — Ollama's own `/v1/models` has no state
+  fields, so Ollama detection is unchanged.
+- New status **loading** (amber): weights on their way into memory, not yet serving.
+- When a server reports `bytes_resident`, that number is shown for the model instead of
+  the process footprint — one process can host several models, and process memory is
+  then only their sum.
+
+### Fixed — model names
+
+- Repository-style ids keep their prefix (`org/model`, `subdir/model`) instead of being
+  cut down to the last path component; only absolute paths and weight file names lose
+  their directory. The Ollama-compat `:latest` tag is dropped, real tags (`:8b`) stay.
+
+### Changed — engine names on custom ports
+
+- A process identified by fingerprint now names the engine even when its port is not in
+  the fallback table, instead of the generic "local model server" label.
+
+### Added
+
+- The "not loaded" footnote is fitted to the label's real width and collapses to
+  "… and N more" rather than being silently cut off by an ellipsis; the full list is in
+  the tooltip.
+- `--shot-panel=<png>` renders the main window to a PNG **in-process**, so UI can be
+  reviewed on machines that have not granted screen-recording permission;
+  `--demo-models` injects a snapshot covering running / loading / idle / failed.
+
 ## [1.1.1] — 2026-10-23
 
 ### Fixed — no machine-specific ports in public code
