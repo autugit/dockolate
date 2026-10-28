@@ -602,7 +602,19 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
         refresh()
         v.layoutSubtreeIfNeeded()
         guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return false }
-        v.cacheDisplay(in: v.bounds, to: rep)
+        // cacheDisplay 只画内容视图、不画窗口背景，而且必须在**位图的绘图上下文**里先铺底色 ——
+        // 直接调 NSBezierPath.fill() 落在空上下文里，什么都不会发生（踩过）。
+        NSGraphicsContext.saveGraphicsState()
+        if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = ctx
+            NSColor.windowBackgroundColor.setFill()
+            NSBezierPath(rect: v.bounds).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            v.cacheDisplay(in: v.bounds, to: rep)
+        } else {
+            NSGraphicsContext.restoreGraphicsState()
+            v.cacheDisplay(in: v.bounds, to: rep)
+        }
         guard let png = rep.representation(using: .png, properties: [:]) else { return false }
         do { try png.write(to: URL(fileURLWithPath: path)); return true } catch { return false }
     }
@@ -719,6 +731,7 @@ final class ProcessWindowController: NSObject, NSWindowDelegate {
                          backing: .buffered, defer: false)
         w.title = "Dockolate"
         w.isReleasedWhenClosed = false
+        w.appearance = NSAppearance(named: .aqua)   // 固定浅色：截图验收与系统深色模式解耦
         w.delegate = self
         w.center()
 
@@ -979,6 +992,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let gpuSampler = GPUSampler()
     private let status = StatusItemController()
     private var procWindow: ProcessWindowController!
+    private var invWindow: InventoryWindowController!
     private var timer: Timer?
     private var animator: Timer?
     private var lastIcon: NSImage?
@@ -991,6 +1005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         procWindow = ProcessWindowController()
         procWindow.sampleProvider = { [weak self] in self?.target ?? Sample() }
+        invWindow = InventoryWindowController()
 
         // GPU 需要两次采样才算得出占用率，先建基准
         gpuSampler.prime()
@@ -1039,6 +1054,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openItem = NSMenuItem(title: "打开进程排行窗口", action: #selector(openProcWindow(_:)), keyEquivalent: "d")
         openItem.target = self
         menu.addItem(openItem)
+
+        let invItem = NSMenuItem(title: "打开本机模型清单", action: #selector(openInventoryWindow(_:)), keyEquivalent: "i")
+        invItem.target = self
+        menu.addItem(invItem)
 
         menu.addItem(.separator())
 
@@ -1132,6 +1151,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleDock(_ sender: NSMenuItem) {
         setDockVisible(!showDockIcon)
         sender.state = showDockIcon ? .on : .off
+    }
+
+    @objc private func openInventoryWindow(_ sender: Any?) {
+        invWindow.show()
     }
 
     @objc private func openProcWindow(_ sender: Any?) {
@@ -1314,6 +1337,23 @@ if CommandLine.arguments.contains("--dump") {
     exit(0)
 }
 
+// 载荷「形状」摘要：只有键名 / 类型 / 条数，**不含任何取值**。
+// 发现报告与 --probe 共用；这段输出是可以直接贴进 issue 的。
+func payloadShape(_ v: Any, depth: Int = 0) -> String {
+    if depth > 4 { return "…" }
+    if let d = v as? [String: Any] {
+        let keys = d.keys.sorted().prefix(12).map { "\($0):\(payloadShape(d[$0]!, depth: depth + 1))" }
+        return "{" + keys.joined(separator: ", ") + (d.count > 12 ? ", …\(d.count - 12) 键" : "") + "}"
+    }
+    if let arr = v as? [Any] {
+        return "[" + "\(arr.count) 条" + (arr.isEmpty ? "" : " × " + payloadShape(arr[0], depth: depth + 1)) + "]"
+    }
+    if v is String { return "String" }
+    if v is NSNumber { return "Number" }
+    if v is NSNull { return "null" }
+    return "\(type(of: v))"
+}
+
 // ---- 自检模式：--probe=<port> 打印一个端口的探测细节（给用户反馈用，不含取值）----
 // 只输出**形状摘要**（键名 / 类型 / 条数），不输出模型名、路径、任何 key。
 if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
@@ -1321,27 +1361,12 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
     guard port > 0 else { print("用法：--probe=<端口>"); exit(2) }
     let w = EngineWatcher()
 
-    func shape(_ v: Any, depth: Int = 0) -> String {
-        if depth > 4 { return "…" }
-        if let d = v as? [String: Any] {
-            let keys = d.keys.sorted().prefix(12).map { "\($0):\(shape(d[$0]!, depth: depth + 1))" }
-            return "{" + keys.joined(separator: ", ") + (d.count > 12 ? ", …\(d.count - 12) 键" : "") + "}"
-        }
-        if let arr = v as? [Any] {
-            return "[" + "\(arr.count) 条" + (arr.isEmpty ? "" : " × " + shape(arr[0], depth: depth + 1)) + "]"
-        }
-        if v is String { return "String" }
-        if v is NSNumber { return "Number" }
-        if v is NSNull { return "null" }
-        return "\(type(of: v))"
-    }
-
     let paths = ["/v1/models", "/api/ps", "/api/tags", "/api/v0/models",
                  "/sdapi/v1/options", "/queue", "/props", "/health"]
     print("=== 端口 \(port) 各接口 ===")
     for path in paths {
         if let obj = LocalHTTP.json(port: port, path: path) {
-            print("  \(path)  有 JSON  \(shape(obj))")
+            print("  \(path)  有 JSON  \(payloadShape(obj))")
         } else {
             print("  \(path)  无应答 / 不是 JSON")
         }
@@ -1360,6 +1385,163 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--probe=") }) {
         print("=== 选中：无（会在界面占一行「待确认」）===")
     }
     exit(0)
+}
+
+// ---- 自检模式：--identify=<路径> 打印权重身份识别结果（目录或单文件）----
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--identify=") }) {
+    let p = (a.replacingOccurrences(of: "--identify=", with: "") as NSString).expandingTildeInPath
+    guard let id = ModelIdentifier.identify(path: p) else {
+        print("无法识别：\(p)")
+        exit(1)
+    }
+    print("family=\(id.family ?? "—")")
+    print("architecture=\(id.architecture ?? "—")")
+    print("quant=\(id.quant ?? "—")")
+    print("format=\(id.format ?? "—")")
+    print("role=\(id.role.rawValue)")
+    print(String(format: "bytes=%.2f GB  files=%d", Double(id.bytes) / 1_073_741_824, id.files))
+    print("display=\(id.displayName)")
+    exit(0)
+}
+
+// ---- 自检模式：--inventory 打印磁盘清单（运行时 + 在盘未登记）+ 对所有账 ----
+// --dirs=a:b     追加扫描目录（冒号分隔）
+// --no-defaults  只扫 --dirs 给的目录（回归测试用，避免本机权重污染断言）
+// --json         机器可读输出
+if CommandLine.arguments.contains("--inventory") {
+    var cfg = ModelInventory.loadConfig()
+    if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--dirs=") }) {
+        cfg.extraDirs = a.replacingOccurrences(of: "--dirs=", with: "")
+            .split(separator: ":").map(String.init).filter { !$0.isEmpty }
+    }
+    if CommandLine.arguments.contains("--no-defaults") {
+        cfg.includeDefaults = false
+        cfg.includeEngineDirs = false
+    }
+    let w = EngineWatcher()
+    _ = w.refresh()
+    Thread.sleep(forTimeInterval: 2.0)
+    let runtime = w.refresh()
+    let inv = ModelInventory().build(runtime: runtime, config: cfg)
+
+    if CommandLine.arguments.contains("--json") {
+        let rows: [[String: Any]] = inv.rows.map { r in
+            var o: [String: Any] = [
+                "title": r.title, "detail": r.detail, "state": r.state.text,
+                "disk_gb": (r.diskGB * 100).rounded() / 100,
+                "mem_gb": (r.memGB * 100).rounded() / 100,
+                "note": r.note,
+            ]
+            o["unregistered"] = (r.state == .unloaded || r.state == .unregistered)
+            return o
+        }
+        let obj: [String: Any] = [
+            "rows": rows,
+            "scanned_roots": inv.scannedRoots.map { $0.replacingOccurrences(of: NSHomeDirectory(), with: "~") },
+            "running": inv.runningCount, "loaded_idle": inv.idleCount,
+            "unregistered": inv.unregisteredCount, "uncertain": inv.uncertainCount,
+            "total_disk_gb": (inv.totalDiskGB * 10).rounded() / 10,
+            "truncated": inv.truncated,
+        ]
+        if let d = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+           let t = String(data: d, encoding: .utf8) { print(t) }
+        exit(0)
+    }
+
+    print("=== 扫描根 ===")
+    for r in inv.scannedRoots { print("  " + r.replacingOccurrences(of: NSHomeDirectory(), with: "~")) }
+    print("=== 清单（\(inv.rows.count) 行：在跑 \(inv.runningCount) · 已装载 \(inv.idleCount) · "
+          + "在盘未登记 \(inv.unregisteredCount) · 待确认 \(inv.uncertainCount)）===")
+    for r in inv.rows {
+        let disk = r.diskGB > 0.01 ? String(format: "%.2f GB", r.diskGB) : "—"
+        let mem = r.memGB > 0.01 ? String(format: "%.2f GB", r.memGB) : "—"
+        print("  \(r.title)　\(r.state.text)　盘 \(disk)　内存 \(mem)　｜　\(r.detail)")
+    }
+    if inv.truncated { print("  （清单超过上限，只显示前 400 行）") }
+    exit(0)
+}
+
+// ---- 自检模式：--discovery-report=<path> 导出脱敏发现报告（贴 issue 用）----
+// 只含：各端口的载荷「形状」、候选评分、选中的适配器、进程识别到的引擎名与计数。
+// **不含**：模型名、绝对路径、pid、key、任何取值。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--discovery-report=") }) {
+    let out = (a.replacingOccurrences(of: "--discovery-report=", with: "") as NSString).expandingTildeInPath
+    let w = EngineWatcher()
+    _ = w.refresh()
+    Thread.sleep(forTimeInterval: 2.0)
+    let snap = w.refresh()
+
+    let paths = ["/v1/models", "/api/ps", "/api/tags", "/api/v0/models",
+                 "/sdapi/v1/options", "/queue", "/props", "/health"]
+    var ports: [[String: Any]] = []
+    for p in snap.scannedPorts {
+        guard LocalHTTP.connectable(port: p) else { continue }
+        var routes: [String: String] = [:]
+        for path in paths {
+            if let obj = LocalHTTP.json(port: p, path: path, timeoutMs: 400) {
+                routes[path] = payloadShape(obj)
+            }
+        }
+        guard !routes.isEmpty else { continue }
+        let cands = w.collectCandidates(port: p, auth: [:])
+        let hit = w.detectEngine(port: p, hint: "探测")
+        ports.append([
+            "port_kind": "declared_or_known",     // 不写真实端口号
+            "shapes": routes,
+            "candidates": cands.map { c in
+                ["adapter": c.adapter, "score": c.score, "resident": c.loaded.count,
+                 "loading": c.loading.count, "failed": c.failed.count,
+                 "unloaded": c.unloaded.count, "unmapped_state": c.reported.count]
+            },
+            "chosen": hit.map { ["adapter": $0.adapter, "score": $0.score, "uncertain": $0.uncertain] } ?? [:] as [String: Any],
+        ])
+    }
+    let report: [String: Any] = [
+        "app": "Dockolate",
+        "app_version": (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev",
+        "engines_found": snap.enginesFound,
+        "model_rows": snap.rows.map { ["state": $0.state.text, "has_name": !$0.name.isEmpty] },
+        "ports": ports,
+        "notes": "shapes 只含键名/类型/条数；不含模型名、路径、pid、key",
+    ]
+    let data = (try? JSONSerialization.data(withJSONObject: report,
+                                            options: [.prettyPrinted, .sortedKeys])) ?? Data()
+    try? data.write(to: URL(fileURLWithPath: out))
+    print("report=\(out)（\(data.count) 字节，脱敏：无模型名 / 无路径 / 无 pid / 无 key）")
+    exit(0)
+}
+
+// ---- 自检模式：--shot-inventory=<path> 把「本机模型清单」窗口离屏渲染成 PNG ----
+// --demo-inventory 注入一份覆盖四种状态（在跑 / 已装载 / 在盘未登记 / 待确认）的快照
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-inventory=") }) {
+    _ = NSApplication.shared
+    let out = a.replacingOccurrences(of: "--shot-inventory=", with: "")
+    let ctl = InventoryWindowController()
+    ctl.show()
+    RunLoop.main.run(until: Date().addingTimeInterval(6.0))   // 等后台扫描回来
+    if CommandLine.arguments.contains("--demo-inventory") {
+        var demo = InventorySnapshot()
+        demo.scannedRoots = ["~/.cache/huggingface/hub", "~/mlx-models", "引擎声明的目录"]
+        demo.rows = [
+            InventoryRow(title: "Some-Video-Model-8bit", detail: "引擎声明的目录 · … · 正在处理请求",
+                         state: .running, diskGB: 70.1, memGB: 28.06),
+            InventoryRow(title: "Some-Chat-Model · 4bit gs64", detail: "~/mlx-models/some-chat-4bit",
+                         state: .idle, diskGB: 16.5, memGB: 15.2),
+            InventoryRow(title: "Some-Draft-Head · Q8_0 · 草稿头", detail: "HF 缓存 · models--org--name",
+                         state: .unregistered, diskGB: 3.85, memGB: 0),
+            InventoryRow(title: "Unknown-State-Model", detail: "引擎 A · 引擎自报状态「warmup-x」",
+                         state: .uncertain, diskGB: 0, memGB: 0),
+            InventoryRow(title: "Some-Image-Model · 8bit · VAE", detail: "自定义目录 · ~/models/img/vae",
+                         state: .unregistered, diskGB: 1.26, memGB: 0),
+        ]
+        demo.runningCount = 1; demo.idleCount = 1
+        demo.unregisteredCount = 2; demo.uncertainCount = 1
+        demo.totalDiskGB = 91.7
+        ctl.selfCheckInject(demo)
+    }
+    let ok = ctl.selfCheckRenderPNG(to: out)
+    print(ok ? "inventory=\(out)" : "inventory=失败")
+    exit(ok ? 0 : 1)
 }
 
 // ---- 自检模式：--shot-panel=<path> 把主窗口离屏渲染成 PNG ----
