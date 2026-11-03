@@ -27,7 +27,7 @@ enum ModelRole: String {
 }
 
 struct ModelIdentity {
-    var family: String?          // 架构 / 模型名（如 Qwen3.8-Flash-Next）
+    var family: String?          // 架构 / 模型名（如 My-Long-Context-Model）
     var architecture: String?     // config 的 model_type 或 GGUF 的 general.architecture
     var quant: String?            // 量化描述（Q8_0 / IQ3_S / 4bit gs64 …）
     var format: String?           // gguf / mlx / safetensors / 未知
@@ -188,10 +188,13 @@ enum ModelIdentifier {
         let lower = name.lowercased()
         var id = ModelIdentity()
         id.files = 1
-        id.bytes = Int64((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)??.int64Value ?? 0)
+        // HF 缓存里的权重常常是指向 blobs/ 的符号链接：属性要取**目标文件**的，
+        // 否则拿到的是链接自身那几十字节，界面上会显示「盘 —」。
+        let realFile = (path as NSString).resolvingSymlinksInPath
+        id.bytes = Int64((try? FileManager.default.attributesOfItem(atPath: realFile)[.size] as? NSNumber)??.int64Value ?? 0)
         id.role = roleFromName(lower, parent: ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent.lowercased())
 
-        id.inodeKey = Self.inodeKey(path)
+        id.inodeKey = Self.inodeKey(realFile)
         id.hasModelEvidence = lower.hasSuffix(".gguf") || lower.hasSuffix(".safetensors") || lower.hasSuffix(".ckpt")
 
         if lower.hasSuffix(".gguf"), let head = GGUFHead.read(path: path) {
@@ -280,6 +283,20 @@ enum ModelIdentifier {
 
         if cfg != nil { id.hasModelEvidence = true }
 
+        // 有 config.json 的**完整模型目录**：目录名里的 mtp / draft 往往是特性名
+        // （比如 `某 27B 对话模型-4bit-MTP` 的 MTP 草稿头是它的一部分），
+        // 不能据此把这个目录本身判成「草稿头」（实测会因此把主权重藏起来）。
+        // 判据以 config 的 architectures 为准；ComfyUI 的结构目录（vae / text_encoder / loras）继续按结构判。
+        if cfg != nil {
+            let structuralRoles: Set<ModelRole> = [.vae, .textEncoder, .lora]
+            if let arch = id.architecture?.lowercased(),
+               arch.contains("draft") || arch.contains("mtp") {
+                id.role = .mtp
+            } else if !structuralRoles.contains(id.role) {
+                id.role = .main
+            }
+        }
+
         // 权重文件：只数直接子层（最多两层，避免把整个快照树走一遍）
         var total: Int64 = 0
         var count = 0
@@ -291,12 +308,13 @@ enum ModelIdentifier {
             let lower = it.lowercased()
             guard weightExts.contains(where: { lower.hasSuffix($0) }) else { continue }
             let full = path + "/" + it
-            let attrs = try? fm.attributesOfItem(atPath: full)
+            let real = (full as NSString).resolvingSymlinksInPath   // 符号链接取目标（HF 缓存）
+            let attrs = try? fm.attributesOfItem(atPath: real)
             let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
             total += size
             count += 1
             if lower.hasSuffix(".safetensors") || lower.hasSuffix(".ckpt") { id.hasModelEvidence = true }
-            if let key = Self.inodeKey(full) {
+            if let key = Self.inodeKey(real) {
                 if largestInode == nil || size > largestInode!.size { largestInode = (size, key) }
             }
             if lower.hasSuffix(".gguf") { id.hasModelEvidence = true }
@@ -358,17 +376,18 @@ enum ModelIdentifier {
     ]
 
     /// 家族名：目录名（去掉量化尾巴）通常最接近用户在 Finder 里看到的名字；
-    /// 目录名是容器名（gguf / model / snapshots …）时才退回文件头里的名字。
+    /// 目录名是容器名（gguf / model / snapshots …）或干脆就是量化标签（IQ3_S）时，
+    /// 才退回文件头里的名字 / 上一层目录名。
     static func pickFamily(dirName: String, headerName: String?, parentName: String? = nil) -> String {
         let stripped = quantStripped(dirName)
         let key = stripped.lowercased()
         let looksContainer = containerishNames.contains(key)
             || key.hasPrefix("gguf-") || key.hasPrefix("snapshots")
             || key.range(of: "^[0-9a-f]{16,}$", options: .regularExpression) != nil
+            || isQuantToken(stripped)
         if looksContainer {
-            if let h = headerName, !h.isEmpty { return h }
-            // `Qwen-Image-2.1/transformer`、`…/text_encoder`、`…/vae`：家族名是上一层那个目录
             if let p = parentName, !p.isEmpty { return quantStripped(p) }
+            if let h = headerName, !h.isEmpty { return h }
         }
         return stripped.isEmpty ? (headerName ?? dirName) : stripped
     }
@@ -422,9 +441,17 @@ enum ModelIdentifier {
         return nil
     }
 
-    /// 去掉量化尾巴，剩下的当展示名
+    /// 去掉量化尾巴，剩下的当展示名。
+    /// ⚠️ 不能用 `deletingPathExtension`：模型名里带版本点（例如 `Model-3.1`）时，
+    /// NSString 会把 `.8-27B-demo-4bit` 整段当成「扩展名」吃掉，家族名只剩前缀。
+    /// 只认已知的权重扩展名。
     static func quantStripped(_ name: String) -> String {
-        var s = (name as NSString).deletingPathExtension
+        var s = name
+        let lower = s.lowercased()
+        for ext in weightExtsPublic where lower.hasSuffix(ext) {
+            s = String(s.dropLast(ext.count))
+            break
+        }
         let upper = s.uppercased()
         for q in quantWords where upper.hasSuffix("-" + q) || upper.hasSuffix("_" + q) || upper.hasSuffix("." + q) {
             s = String(s.dropLast(q.count + 1))
@@ -433,7 +460,18 @@ enum ModelIdentifier {
         if let r = s.range(of: "[-_.][0-9]+bit$", options: [.regularExpression, .caseInsensitive]) {
             s = String(s[..<r.lowerBound])
         }
+        if let r = s.range(of: "[-_.](bf16|fp16|f16|fp32|f32)$", options: [.regularExpression, .caseInsensitive]) {
+            s = String(s[..<r.lowerBound])
+        }
         return s
+    }
+
+    /// 整个名字就是量化标签（`IQ3_S` / `Q8_0` / `4bit`）—— 这种目录名没有信息量，
+    /// 家族名要往上找一层（实测：`…/<repo>-IQ3_S/IQ3_S/` 这种 GGUF 布局很常见）。
+    static func isQuantToken(_ s: String) -> Bool {
+        let u = s.uppercased()
+        if quantWords.contains(where: { $0 == u }) { return true }
+        return u.range(of: "^[0-9]+BIT$", options: .regularExpression) != nil
     }
 
     /// 只读 safetensors 的 JSON 头（8 字节 LE 长度 + JSON）

@@ -10,7 +10,8 @@
 
 <p align="center">
   <img src="docs/img/dock-icon.png" width="140" alt="Dock 图标：四格水位 C / G / M / Z">
-  <img src="docs/img/window.png" width="440" alt="窗口：本机 AI 模型、进程榜、内存分解">
+  <img src="docs/img/window.png" width="345" alt="首页：系统总览、内存去向、本机 AI 模型、进程榜">
+  <img src="docs/img/manager.png" width="345" alt="AI 管理页：模型运行时指标、本地模型管理器（三色可行性）、工作组">
 </p>
 
 
@@ -30,10 +31,22 @@
 水位配色：**< 20% 蓝 · 20–50% 绿 · 50–80% 黄 · ≥ 80% 红**
 
 - 图标里**不放数字**——数字会跟字母抢地方，而且 Dock 尺寸下也读不准；精确值去窗口看。
-- 点 Dock 图标 → 弹出窗口：
-  - **本机 AI 模型**：内存里挂着的本地模型（oMLX / llama.cpp / ComfyUI / Draw Things …），
-    按内存占用从大到小排，逐行标 **正在运行 / 挂载待机 / 出现故障**；声明了但没加载的列在脚注里；
-  - **CPU / GPU / 内存占用最高的各三个进程**，外加内存分解（应用/联动/压缩/缓存/空闲）与换页量。
+- 点 Dock 图标 → 弹出窗口，卡片式两页：
+  - **首页**：三格总览（CPU / GPU / 内存）、内存去向堆叠条、**本机 AI 模型**
+    （内存里挂着的本地模型，按内存占用从大到小排，逐行标 **正在运行 / 挂载待机 / 出现故障**）、
+    CPU / GPU / 内存占用最高的各三个进程；
+  - **AI 管理**：
+    - **模型运行时**：每个在内存里的模型可展开看**这一次加载以来**的运行时间、
+      平均 prefill / decode 速度、请求数、输入输出 token、平均 TTFT，
+      并标出数据来源（引擎 `/metrics` 或引擎日志；拿不到就写「—」）；
+      **生图 / 视频引擎没有预填充和解码**，改显示本次启动出了几张 / 几段、
+      每轮耗时、当前这张 / 这段已经跑了多久（视频还带 12/20 步进度）。
+      ComfyUI 走 `/queue` + `/history`（引擎自己的时间戳），H3 / mlx-serve 走引擎日志；
+      窗口打开之前的轮次照样计轮次，但耗时标「未观测」，不猜；
+    - **模型管理器**：自动扫盘识别 + 分类（对话/生图/视频/语音/嵌入/部件），
+      估算各自内存，用**三色**标出当前可用内存还拉不拉得起（绿＝宽裕 / 黄＝勉强 / 红＝放不下），
+      可从界面统一**拉起 / 卸载**；
+    - **工作组**：把几个模型绑成一个名字一起拉起、一起停，合计内存同样三色判定能否并存。
 - 菜单栏读数默认关闭，窗口里的「菜单栏读数」按钮可随时打开。
 
 ### Z 是什么
@@ -66,7 +79,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 | **在 `GET /v1/models` 里逐条报状态的引擎**（如 **mlx-serve**） | 取 `state` / `loaded` / `bytes_resident` → 正在运行 / 加载中 / 未加载 |
 | **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`，取不到再从 `--model` 参数抠 |
 | **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
-| **MLX 系：Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx-serve` / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`，取不到再从 argv 抠 |
+| **MLX 系（Splash / oMLX / MTPLX / mlx-serve / mlx_lm.server / mlx_vlm.server 等）** | `GET /v1/models`，取不到再从 argv 抠 |
 | **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` 或进程指纹 |
 | **ComfyUI** | `GET /queue` → `GET /history` 的 `ckpt_name` / `unet_name` |
 | **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` 的 `sd_model_checkpoint` |
@@ -79,7 +92,7 @@ Z 越高说明系统为了腾地方压得越狠、换出去的越多，内存越
 `quickHints`（扫描粗筛，值不值得深扫这个进程）、`knownEngines`（进程认不出来时的端口兜底）。
 缺哪个引擎就往 `kindHints` 加一行，判定逻辑不用动；自定义端口用 `engines.json` 补。
 
-有的引擎是**两层进程**（父进程监听端口、子进程跑推理，Splash 1.4 就是：Python 父进程 0.4 GB +
+有的引擎是**两层进程**（父进程监听端口、子进程跑推理，某 MLX 引擎 就是：Python 父进程 0.4 GB +
 `serve-native` 子进程几十 GB）。内存与「是否在算」按**整棵进程树**聚合，不会只报父进程那几十 MB。
 
 状态口径：**正在运行** = 端口在应答且最近 12 秒内真算过东西（CPU 或 GPU 时间在涨）；
@@ -168,7 +181,7 @@ Dockolate --check-adapters     # 哪几份读到了、多少条目、有没有�
 ### 发布前自检
 
 ```bash
-bash tests/verify_all.sh       # 三套回归 + 干净环境冒烟，产出 tests/last_report.json
+bash tests/verify_all.sh       # 四套回归（引擎/身份/签名表/管理器）+ 干净环境冒烟，产出 tests/last_report.json
 ```
 
 「干净环境」＝ 换一个**空的 HOME**（没有模型/配置/缓存）：清单为空、无引擎时探测正常、
@@ -187,6 +200,11 @@ $BIN --engines                                # 引擎探测报告（模型名 /
 $BIN --engines --ports=9000,9001              # 额外探测自定义端口
 $BIN --shot-panel=/tmp/panel.png              # 主窗口离屏渲染成 PNG（进程内 cacheDisplay）
 $BIN --shot-panel=/tmp/panel.png --demo-models # 注入「运行/加载中/待确认/故障」四态快照，验收配色与文案
+$BIN --shot-manager=/tmp/ai.png                # AI 管理页离屏渲染（真实数据）
+$BIN --shot-manager=/tmp/ai.png --demo-models  # AI 管理页 + 全状态演示（三色可行性 / 运行时指标 / 工作组）
+$BIN --self-test-manager                       # 管理器判据自检：分类/估算/三色/配方/指标解析（46 条断言）
+$BIN --mgmt-list                               # 管理器清单（id / 分类 / 估算 / 状态），排查「为什么这行不可拉起」
+$BIN --mgmt-action=launch:<id>                 # 用界面同一条代码路径真跑一次拉起 / 卸载
 $BIN --probe=<端口>                            # 打印各接口的载荷形状 + 候选评分 + 选中的适配器（可贴进反馈）
 $BIN --identify=<路径>                         # 这个权重目录/文件到底是什么（家族/量化/角色/字节）
 $BIN --inventory [--json] [--dirs=a:b]         # 磁盘清单（运行时 + 在盘未登记）
@@ -197,6 +215,42 @@ bash tests/verify.sh && bash tests/verify_identity.sh   # 两套回归：引擎�
 
 `--shot-panel` 不需要屏幕录制权限（本机 `screencapture` 直接报
 `could not create image from display`），界面验收一律走它。
+
+## 模型管理器的启动配方（可选）
+
+自动识别只负责「看得见」，**不会自己拉起任何东西**。要让管理器能启停某个模型，
+在 `~/Library/Application Support/Dockolate/launchers.json` 里写一条配方：
+
+```json
+{
+  "reserveGB": 6,
+  "scanDirs": ["~/my-models"],
+  "recipes": [
+    {
+      "id": "my-chat-model",
+      "title": "我的对话模型",
+      "modelPatterns": ["某 27B 对话模型"],
+      "path": "~/my-models/某 27B 对话模型-4bit",
+      "port": 12345,
+      "category": "chat",
+      "estMemGB": 26,
+      "start": "~/bin/launch-my-model.sh start",
+      "stop":  "~/bin/launch-my-model.sh stop",
+      "log": "~/Library/Logs/my-model/server.log",
+      "metrics": "splash",
+      "readyTimeoutSec": 240
+    }
+  ]
+}
+```
+
+- `start` / `stop` 可以是 shell 串（写一行）也可以是 argv 数组；
+- **启动命令可以是常驻服务**（llama.cpp / ComfyUI 永远不退出）：判成功看**端口就绪**，不看命令退出；
+- Ollama（`keep_alive`）与 LM Studio（`lms`）不用写配方就能启停；
+- 工作组存在同目录的 `workgroups.json`；
+- 三色判据：`估算 ≤ 可用×85%` 绿 · `≤ 可用` 黄 · 否则红，`可用 = 物理 − 已用 − reserveGB`；
+  估算 = 磁盘上的权重 + 按类别给的开销，**跑过一次之后改用实测峰值**。
+- `metrics` 可选 `prometheus`（llama.cpp 要带 `--metrics` 启动）、`splash`、`strata`（某些引擎的 /metrics 是 JSON）。
 
 ## 数据口径
 
@@ -269,3 +323,15 @@ AI 模型清点出来的。
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
+
+## 给 AI 用的管理接口
+
+```bash
+Dockolate --api '{"op":"help"}'                                    # 全部 op
+Dockolate --api '{"op":"model.add","model":{…}}'                   # 添加模型并配好启停
+Dockolate --api '{"op":"status"}'                                  # 内存 + 在跑的模型
+Dockolate --doctor                                                # 完整性/配置/守护自检
+```
+
+契约与字段说明见 [`docs/CLI_API.md`](docs/CLI_API.md)；发布版安装（`/Applications`，root 只读）
+见 `tools/install-system.command`。

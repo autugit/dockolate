@@ -60,6 +60,8 @@ struct ModelRow {
     var note: String
     var pid: pid_t? = nil       // 仅内部用：判定「一个进程托管多个模型 ⇒ 内存是合计」
     var shared: Bool = false
+    var port: Int? = nil        // 服务端口（管理器要按端口找指标来源）
+    var engine: String = ""     // 引擎显示名（Splash / Strata / ComfyUI …）
 }
 
 struct ModelSnapshot {
@@ -140,6 +142,52 @@ enum LocalHTTP {
         guard let b = body(port: port, path: path, timeoutMs: timeoutMs, headers: headers),
               let d = b.data(using: .utf8) else { return nil }
         return try? JSONSerialization.jsonObject(with: d)
+    }
+
+    /// 极简 HTTP/1.0 POST（JSON）。给「拉起 / 卸载」这类控制请求用（Ollama 的 keep_alive）。
+    static func postJSON(port: Int, path: String, json: [String: Any],
+                         timeoutMs: Int32 = 5000, headers: [String: String] = [:]) -> String? {
+        guard let payload = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+        let s = socket(AF_INET, SOCK_STREAM, 0)
+        guard s >= 0 else { return nil }
+        defer { close(s) }
+        var tv = timeval(tv_sec: 0, tv_usec: timeoutMs * 1000)
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let cr = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                connect(s, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard cr == 0 else { return nil }
+        var head = "POST \(path) HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+        head += "Content-Length: \(payload.count)\r\n"
+        for (k, v) in headers { head += "\(k): \(v)\r\n" }
+        head += "\r\n"
+        var request = Data(head.utf8)
+        request.append(payload)
+        request.withUnsafeBytes { raw in
+            var sent = 0
+            while sent < raw.count {
+                let n = write(s, raw.baseAddress!.advanced(by: sent), raw.count - sent)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
+        var data = Data()
+        var buf = [UInt8](repeating: 0, count: 8192)
+        while data.count < 512 * 1024 {
+            let n = read(s, &buf, buf.count)
+            if n <= 0 { break }
+            data.append(contentsOf: buf[0..<n])
+        }
+        guard let text = String(data: data, encoding: .utf8),
+              let r = text.range(of: "\r\n\r\n") else { return nil }
+        return String(text[r.upperBound...])
     }
 }
 
@@ -233,7 +281,7 @@ final class EngineWatcher {
     private func loadConfigIfNeeded() {
         guard !configLoaded else { return }
         configLoaded = true
-        let path = NSHomeDirectory() + "/Library/Application Support/Dockolate/engines.json"
+        let path = SupportDir.engines
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return }
         if let ports = obj["extraPorts"] as? [Int] { extraPorts.append(contentsOf: ports) }
@@ -258,6 +306,7 @@ final class EngineWatcher {
         // 本机 MLX 系引擎
         ("omlx", "oMLX"),
         ("splash", "Splash"),                  // Splash 1.4：engine/splash serve-native，权重跑在这层
+        ("strata", "Strata"),                  // Strata：serve/server.py 包装 + build-metal/strata 子进程
         ("mtplx", "MTPLX"),
         ("flash-next", "Flash-Next"), ("flashnext", "Flash-Next"),
         ("swift-qwen", "Swift-Qwen"), ("swift_qwen", "Swift-Qwen"),
@@ -329,7 +378,7 @@ final class EngineWatcher {
     //    所以引擎改名/新增不必等发版；上表只是内置默认值。
     // 快速筛选用：只为「值不值得深扫这个进程」把关，所以只放足够具体的词。
     // 放泛词（swift / exo / wan）会让每 2 秒一次的扫描多跑几十个无关进程的 argv+fd 解析。
-    private let quickHints = ["omlx", "splash", "llama", "mlx", "ollama", "lmstudio", "lm studio",
+    private let quickHints = ["omlx", "splash", "strata", "llama", "mlx", "ollama", "lmstudio", "lm studio",
                               "vllm", "sglang", "kobold", "comfy", "draw things", "drawthings",
                               "mflux", "fooocus", "invokeai", "stable-diffusion", "sd-server",
                               "sdnext", "sd.next", "diffusers", "qwen-image", "qwen_image",
@@ -343,7 +392,10 @@ final class EngineWatcher {
     private let interpreters = ["python", "python3", "node", "ruby", "java", "uv", "uvicorn"]
 
     private func classify(name: String, path: String, argv: [String]) -> String? {
-        let head = argv.first ?? ""
+        // 前 8 个参数足够带上引擎名（`python -m serve/server.py --engine strata`）。
+        // 参数里的路径只取最后一段：整条路径里的目录名会骗人（`~/mlx-models/...`
+        // 会让 llama.cpp 的进程被认成 MLX —— 实测踩过）。
+        let head = argv.prefix(8).map { ($0 as NSString).lastPathComponent }.joined(separator: " ")
         let hay = (name + " " + path + " " + head).lowercased()
         for (k, v) in adapters.processHints where hay.contains(k) { return v }   // 外部表优先（可覆盖内置）
         for (k, v) in kindHints where hay.contains(k) { return v }
@@ -380,7 +432,8 @@ final class EngineWatcher {
 
     /// 模型名：优先 argv 里的 --model / -m 等；不够再退回引擎名
     private func modelDisplay(argv: [String], kind: String) -> String {
-        let flags = ["--model", "-m", "--model-path", "--model-dir", "--hf-repo", "--model-id", "--repo-id"]
+        let flags = ["--model", "-m", "--model-path", "--model-dir", "--hf-repo", "--model-id", "--repo-id",
+                     "--native", "--gguf"]
         for (i, a) in argv.enumerated() {
             if flags.contains(a), i + 1 < argv.count, !argv[i + 1].hasPrefix("-") {
                 let base = (argv[i + 1] as NSString).lastPathComponent
@@ -778,8 +831,11 @@ final class EngineWatcher {
         // 4.1b portsOnly（自检用）：把本机真在跑、但不在 extraPorts 里的引擎进程剔掉，
         // 否则它们会从「端口没覆盖到的进程」那条分支混进结果，污染回归断言。
         if portsOnly {
+            // 只留「监听在 extraPorts 上」的进程。没有端口的应用内模型也要剔掉 ——
+            // 自检时本机正跑着的引擎（比如只开子进程、父进程监听端口的那些）会以
+            // 「应用内模型」的形态混进断言里，让「干净环境」不再干净。
             procs.removeAll { p in
-                !p.ports.isEmpty && p.ports.allSatisfy { !extraPorts.contains($0) }
+                p.ports.isEmpty || p.ports.allSatisfy { !extraPorts.contains($0) }
             }
         }
 
@@ -882,10 +938,12 @@ final class EngineWatcher {
             return false
         }
 
-        func append(pid: pid_t?, name: String, mem: UInt64, state: ModelState, note: String) {
+        func append(pid: pid_t?, name: String, mem: UInt64, state: ModelState, note: String,
+                    port: Int? = nil, engine: String = "") {
             if let p = pid { pidUse[p, default: 0] += 1 }
             snap.rows.append(ModelRow(name: name, memGB: Double(mem) / 1_073_741_824,
-                                      state: state, note: note, pid: pid))
+                                      state: state, note: note, pid: pid,
+                                      port: port, engine: engine))
         }
 
         for hit in hits {
@@ -903,7 +961,8 @@ final class EngineWatcher {
                 append(pid: holder?.pid, name: hit.kind, mem: memBytes,
                        state: hit.uncertain ? .uncertain : (running ? .running : .idle),
                        note: "pid \(holder?.pid ?? 0) · \(engineTag) · "
-                           + (hit.uncertain ? hit.evidenceNote : "没有加载模型"))
+                           + (hit.uncertain ? hit.evidenceNote : "没有加载模型"),
+                       port: hit.port, engine: hit.kind)
             } else {
                 var first = true
                 for name in hit.loaded {
@@ -919,7 +978,8 @@ final class EngineWatcher {
                     }
                     append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
                            state: running ? .running : .idle,
-                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · \(detail)")
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · \(detail)",
+                           port: hit.port, engine: hit.kind)
                     first = false
                 }
                 // 加载中：权重正在往内存里搬（大模型要几十秒到几分钟），这时服务还接不了请求，
@@ -928,13 +988,15 @@ final class EngineWatcher {
                     let own = hit.resident[name].map { UInt64($0) }
                     append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
                            state: .loading,
-                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 权重正在加载，暂不接请求")
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 权重正在加载，暂不接请求",
+                           port: hit.port, engine: hit.kind)
                     first = false
                 }
                 for name in hit.failed {
                     append(pid: first ? holder?.pid : nil, name: name, mem: 0,
                            state: .failed,
-                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 该模型加载失败（服务端日志有原因）")
+                           note: "pid \(holder?.pid ?? 0) · \(engineTag) · 该模型加载失败（服务端日志有原因）",
+                           port: hit.port, engine: hit.kind)
                     first = false
                 }
                 // 引擎自报了状态、但我们映射不了：原样显示，不并进「未加载」（R3）
@@ -943,7 +1005,8 @@ final class EngineWatcher {
                     append(pid: first ? holder?.pid : nil, name: name, mem: own ?? memBytes,
                            state: .uncertain,
                            note: "pid \(holder?.pid ?? 0) · \(engineTag) · 引擎自报状态「\(raw)」，"
-                               + "这个值我们还不认识（原样显示，不当作未加载）")
+                               + "这个值我们还不认识（原样显示，不当作未加载）",
+                           port: hit.port, engine: hit.kind)
                     first = false
                 }
             }
@@ -977,7 +1040,8 @@ final class EngineWatcher {
                 state = .failed
                 note = "pid \(p.pid) · 端口 \(p.ports.map(String.init).joined(separator: "/")) 连不上"
             }
-            append(pid: p.pid, name: p.display, mem: p.memBytes, state: state, note: note)
+            append(pid: p.pid, name: p.display, mem: p.memBytes, state: state, note: note,
+                   port: livePort, engine: p.kind)
         }
 
         // 4.5b 引擎声明的权重目录（清单层要用）

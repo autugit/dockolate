@@ -23,6 +23,7 @@ struct Sample {
     var memFreeGB: Double = 0
     var memPressurePct: Double = 0    // (压缩 + 换页) ÷ 物理内存 —— 内存真正紧张的程度
     var swapUsedGB: Double = 0
+    var memDeduped: Bool = false      // 应用/联动是否因 GPU 显存重复计数而取了去重口径
 }
 
 // ============================================================
@@ -83,6 +84,7 @@ final class CPUSampler {
 // ============================================================
 
 struct MemBreakdown {
+    var deduped: Bool = false
     var appGB: Double = 0
     var wiredGB: Double = 0
     var compressedGB: Double = 0
@@ -124,18 +126,24 @@ final class MemorySampler {
         guard kr == KERN_SUCCESS else {
             return (0, 0, totalBytes / 1_073_741_824)
         }
-        let G = 1_073_741_824.0
         // 活动监视器口径：已用 = 应用内存(匿名页) + 联动(wired) + 压缩器占用。
         // 注意：不能用 active_count —— 它混进了大量 file-backed 页面（文件缓存），
         //       那部分随时可回收，算进「已用」会让占用率虚高几十 GB。
+        let G = 1_073_741_824.0
         let appPages = Double(stats.internal_page_count) * pageSize
         let wired    = Double(stats.wire_count) * pageSize
         let compressed = Double(stats.compressor_page_count) * pageSize
         let cached   = Double(stats.external_page_count) * pageSize
         let freeB    = Double(stats.free_count) * pageSize
-        let used = appPages + wired + compressed
+        // 口径见 src/MemoryMath.swift：macOS 26+ 的 GPU 显存会让「应用 + 联动」重复计数，
+        // 三项之和超过物理内存时改用去重口径（否则「可用」永远是 0）。
+        let used = MemoryMath.usedGB(internalGB: appPages / G, wiredGB: wired / G,
+                                     compressedGB: compressed / G,
+                                     totalGB: totalBytes / G).used * G
         let pct = totalBytes > 0 ? min(100, used / totalBytes * 100) : 0
-        self.last = MemBreakdown(appGB: appPages / G, wiredGB: wired / G,
+        let math = MemoryMath.usedGB(internalGB: appPages / G, wiredGB: wired / G,
+                                     compressedGB: compressed / G, totalGB: totalBytes / G)
+        self.last = MemBreakdown(deduped: math.deduped, appGB: appPages / G, wiredGB: wired / G,
                                  compressedGB: compressed / G, cachedGB: cached / G,
                                  freeGB: freeB / G, totalGB: totalBytes / G)
         return (pct, used / G, totalBytes / G)
@@ -192,17 +200,45 @@ final class GPUSampler {
     private var cached: Double?
     private let interval: TimeInterval = 2.0
 
+    /// 系统官方口径：IOAccelerator 的 "Device Utilization %"（0–100）。
+    /// ⛔ 不要再拿「各 GPU client 累计时间求和 ÷ 墙钟」当利用率——
+    ///    macOS 上 WindowServer / 各 app / 计算任务并行提交，各自的时间会累加，
+    ///    求和后必然超过墙钟（实测空闲 13% 却显示 96%，被 min(100) 截成"满载"）。
+    ///    那个数只适合判断「某个进程此刻在不在算」（活动判定仍用它）。
+    private func readDeviceUtilization() -> Double? {
+        guard let text = ProcessSampler.run("/usr/sbin/ioreg",
+                ["-r", "-d", "1", "-c", "IOAccelerator", "-w", "0"]) else { return nil }
+        var best: Double?
+        var idx = text.startIndex
+        while let r = text.range(of: "\"Device Utilization %\"=", range: idx..<text.endIndex) {
+            let digits = text[r.upperBound...].prefix(while: { $0.isNumber })
+            if let v = Double(digits) {
+                best = max(best ?? 0, v)
+            }
+            if digits.endIndex <= r.upperBound { break }
+            idx = digits.endIndex
+        }
+        return best
+    }
+
     func next() -> Double? {
         let now = Date()
         let dt = now.timeIntervalSince(prevAt)
         guard dt >= interval else { return cached }
-        guard let cur = readGPUClientTimes()?.total else { return cached }
-
         prevAt = now
+
+        // 优先用系统口径
+        if let util = readDeviceUtilization() {
+            cached = min(100, max(0, util))
+            prevTotal = readGPUClientTimes()?.total      // 顺带维护基准，供回退路径用
+            return cached
+        }
+
+        // 回退：老办法（只有在读不到 Device Utilization 时才用，数值会偏高）
+        guard let cur = readGPUClientTimes()?.total else { return cached }
         let prev = prevTotal
         prevTotal = cur
-
-        guard let prev = prev, dt > 0.2 else { return cached }   // 首拍只建基准
+        guard let prev = prev, dt > 0.2 else { return cached }
         let delta = cur - prev
         guard delta >= 0 else { return cached }
         cached = min(100, Double(delta) / (dt * 1_000_000_000) * 100)
@@ -539,450 +575,6 @@ final class ProcessSampler {
 }
 
 // ============================================================
-// MARK: - 进程榜窗口（点 Dock 图标 / 菜单打开）
-// ============================================================
-
-final class ProcessWindowController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
-    private let sampler = ProcessSampler()
-    private var timer: Timer?
-
-    private var summaryLabel: NSTextField?
-    private var breakdownLabel: NSTextField?
-    private var swapLabel: NSTextField?
-    private var nameLabels: [NSTextField] = []
-    private var valueLabels: [NSTextField] = []
-    private var dockCheckbox: NSButton?
-    private var menuCheckbox: NSButton?
-    // 本机 AI 引擎一栏
-    private let modelSampler = EngineWatcher()
-    private let engineQueue = DispatchQueue(label: "io.github.autugit.dockolate.engines", qos: .utility)
-    private var engineProbeBusy = false
-    private let modelRowLimit = 4
-    private var modelNameLabels: [NSTextField] = []
-    private var modelStateLabels: [NSTextField] = []
-    private var modelMemLabels: [NSTextField] = []
-    private var modelFootnote: NSTextField?
-    private var cachedModels: ModelSnapshot?
-    private var modelSampledAt = Date.distantPast
-
-    /// 由 AppDelegate 注入：取当前总占用率
-    var sampleProvider: (() -> Sample)?
-
-    func show() {
-        if window == nil { build() }
-        guard let w = window else { return }
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        startTimer()
-        refresh()
-    }
-
-    private func startTimer() {
-        guard timer == nil else { return }
-        // 首次调用 GPU 只建立基准（无差值），第二次起才有数
-        _ = sampler.topGPU()
-        let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.refresh() }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
-    }
-
-    // ---- 开发自检：把主窗口离屏渲染成 PNG ----
-    // 本机没有屏幕录制权限（screencapture 直接报 "could not create image from display"），
-    // 所以界面的验收面改成进程内 cacheDisplay —— 不碰 TCC，拿到的是真实像素。
-    // 用法：Dockolate --shot-panel=/tmp/panel.png [--demo-models]
-    /// 自检用：直接注入一份模型快照，覆盖「加载中 / 出现故障」这类现场难碰到的状态
-    func selfCheckInjectModels(_ snap: ModelSnapshot) {
-        cachedModels = snap
-        modelSampledAt = Date()
-    }
-
-    func selfCheckRenderPNG(to path: String) -> Bool {
-        guard let w = window, let v = w.contentView else { return false }
-        refresh()
-        v.layoutSubtreeIfNeeded()
-        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return false }
-        // cacheDisplay 只画内容视图、不画窗口背景，而且必须在**位图的绘图上下文**里先铺底色 ——
-        // 直接调 NSBezierPath.fill() 落在空上下文里，什么都不会发生（踩过）。
-        NSGraphicsContext.saveGraphicsState()
-        if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
-            NSGraphicsContext.current = ctx
-            NSColor.windowBackgroundColor.setFill()
-            NSBezierPath(rect: v.bounds).fill()
-            NSGraphicsContext.restoreGraphicsState()
-            v.cacheDisplay(in: v.bounds, to: rep)
-        } else {
-            NSGraphicsContext.restoreGraphicsState()
-            v.cacheDisplay(in: v.bounds, to: rep)
-        }
-        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
-        do { try png.write(to: URL(fileURLWithPath: path)); return true } catch { return false }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        stopTimer()   // 窗口关了就不再采样，空载零代价
-    }
-
-    @discardableResult
-    private func section(_ title: String, top: CGFloat, into content: NSView) -> NSTextField {
-        let t = NSTextField(labelWithString: title)
-        t.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        t.textColor = .tertiaryLabelColor
-        t.frame = NSRect(x: 24, y: top, width: 380, height: 16)
-        content.addSubview(t)
-        return t
-    }
-
-    // ---- 模型行数自适应 ----
-    // 模型通常只有 1–2 个，固定 4 行会留出大片空白。这里按实际行数把窗口整体收短：
-    // 顶部区跟着上移（保持离窗口顶部的距离），下方区坐标不动（保持彼此间距）。
-    private var topViews: [(view: NSView, baseY: CGFloat)] = []
-    private var belowViews: [(view: NSView, baseY: CGFloat)] = []
-    private var appliedShrink: CGFloat = -1
-    /// 建窗时的 frame（含标题栏）—— 每次都用它算目标高度，绝不在当前高度上做增量
-    /// （踩过：行数在 1↔2 之间来回变时，每次 `height -= dy` 会把窗口越削越扁，顶部内容被裁掉）
-    private var baseFrame: NSRect?
-
-    private func trackTop(_ v: NSView) { topViews.append((v, v.frame.origin.y)) }
-    private func trackBelow(_ v: NSView) { belowViews.append((v, v.frame.origin.y)) }
-
-    private func applyModelLayout(rowCount: Int) {
-        let used = max(1, min(modelRowLimit, rowCount))
-        let dy = CGFloat(modelRowLimit - used) * 24
-        guard dy != appliedShrink, let w = window, let bf = baseFrame else { return }
-        appliedShrink = dy
-        for (v, y) in topViews { v.frame.origin.y = y - dy }
-        // 下方区（脚注 / 三段榜 / 按钮）不随模型行数移动，显式复位一次，保证窗口缩短后不漂移
-        for (v, y) in belowViews { v.frame.origin.y = y }
-        for i in 0..<modelRowLimit {
-            guard i < modelNameLabels.count else { continue }
-            let hide = i >= used
-            modelNameLabels[i].isHidden = hide
-            modelStateLabels[i].isHidden = hide
-            modelMemLabels[i].isHidden = hide
-        }
-        // 目标高度 = 基准高度 − 省下的行高；顶边位置保持不动
-        let targetHeight = bf.height - dy
-        var f = w.frame
-        let topEdge = f.origin.y + f.height
-        f.size.height = targetHeight
-        f.origin.y = topEdge - targetHeight
-        w.setFrame(f, display: true)
-    }
-
-    // ---- 进程行 ----
-    private func row(y: CGFloat, into content: NSView) {
-        let name = NSTextField(labelWithString: "—")
-        name.font = NSFont.systemFont(ofSize: 13)
-        name.textColor = .labelColor
-        name.lineBreakMode = .byTruncatingMiddle
-        name.frame = NSRect(x: 24, y: y, width: 310, height: 18)
-        content.addSubview(name)
-
-        let val = NSTextField(labelWithString: "")
-        val.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-        val.alignment = .right
-        val.frame = NSRect(x: 340, y: y, width: 96, height: 18)
-        content.addSubview(val)
-
-        nameLabels.append(name)
-        valueLabels.append(val)
-        trackBelow(name)
-        trackBelow(val)
-    }
-
-    /// 模型行：名称（左）· 状态（中，带颜色）· 内存占用（右）
-    private func modelRow(y: CGFloat, into content: NSView) {
-        let name = NSTextField(labelWithString: "—")
-        name.font = NSFont.systemFont(ofSize: 12.5)
-        name.textColor = .labelColor
-        name.lineBreakMode = .byTruncatingMiddle
-        name.frame = NSRect(x: 24, y: y, width: 226, height: 17)
-        content.addSubview(name)
-
-        let st = NSTextField(labelWithString: "")
-        st.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
-        st.lineBreakMode = .byTruncatingTail
-        st.frame = NSRect(x: 258, y: y + 1, width: 88, height: 16)
-        content.addSubview(st)
-
-        let mem = NSTextField(labelWithString: "")
-        mem.font = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold)
-        mem.alignment = .right
-        mem.frame = NSRect(x: 356, y: y, width: 80, height: 17)
-        content.addSubview(mem)
-
-        modelNameLabels.append(name)
-        modelStateLabels.append(st)
-        modelMemLabels.append(mem)
-        trackTop(name)
-        trackTop(st)
-        trackTop(mem)
-    }
-
-    private func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 640),
-                         styleMask: [.titled, .closable, .miniaturizable],
-                         backing: .buffered, defer: false)
-        w.title = "Dockolate"
-        w.isReleasedWhenClosed = false
-        w.appearance = NSAppearance(named: .aqua)   // 固定浅色：截图验收与系统深色模式解耦
-        w.delegate = self
-        w.center()
-
-        let content = NSView(frame: w.contentLayoutRect)
-        w.contentView = content
-
-        // 顶部总览
-        let s = NSTextField(labelWithString: "当前总占用")
-        s.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        s.textColor = .tertiaryLabelColor
-        s.frame = NSRect(x: 24, y: 606, width: 200, height: 16)
-        content.addSubview(s)
-        trackTop(s)
-
-        let sum = NSTextField(labelWithString: "—")
-        sum.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        sum.frame = NSRect(x: 24, y: 582, width: 412, height: 20)
-        content.addSubview(sum)
-        summaryLabel = sum
-        trackTop(sum)
-
-        // 内存分解：让「进程榜加起来才几个 GB」有处可解释
-        let bd = NSTextField(labelWithString: "")
-        bd.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        bd.textColor = .secondaryLabelColor
-        bd.lineBreakMode = .byTruncatingTail
-        bd.frame = NSRect(x: 24, y: 554, width: 412, height: 16)
-        content.addSubview(bd)
-        breakdownLabel = bd
-        trackTop(bd)
-
-        // 换页（压缩内存见上一行；图标上不显示这两项，只在这里看）
-        let sw = NSTextField(labelWithString: "")
-        sw.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        sw.textColor = .secondaryLabelColor
-        sw.lineBreakMode = .byTruncatingTail
-        sw.frame = NSRect(x: 24, y: 538, width: 412, height: 16)
-        content.addSubview(sw)
-        swapLabel = sw
-        trackTop(sw)
-
-        // 本机 AI 模型（内存里挂着的本地模型 + 运行状态）
-        trackTop(section("本机 AI 模型（按内存占用排序）", top: 506, into: content))
-        for i in 0..<modelRowLimit { modelRow(y: 482 - CGFloat(i) * 24, into: content) }
-
-        let foot = NSTextField(labelWithString: "")
-        foot.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
-        foot.textColor = .secondaryLabelColor
-        foot.lineBreakMode = .byTruncatingTail
-        foot.frame = NSRect(x: 24, y: 388, width: 412, height: 16)
-        content.addSubview(foot)
-        modelFootnote = foot
-        trackBelow(foot)
-
-        // 三段排行
-        trackBelow(section("CPU 占用最高", top: 360, into: content))
-        for i in 0..<3 { row(y: 334 - CGFloat(i) * 25, into: content) }
-        trackBelow(section("GPU 占用最高", top: 256, into: content))
-        for i in 0..<3 { row(y: 230 - CGFloat(i) * 25, into: content) }
-        trackBelow(section("内存占用最高（物理占用，含共享页）", top: 152, into: content))
-        for i in 0..<3 { row(y: 126 - CGFloat(i) * 25, into: content) }
-
-        // 底部按钮
-        let quit = NSButton(title: "退出 Dockolate", target: self, action: #selector(quitApp))
-        quit.bezelStyle = .rounded
-        quit.frame = NSRect(x: 326, y: 24, width: 110, height: 28)
-        content.addSubview(quit)
-        trackBelow(quit)
-
-        // 两个显示面各自开关（默认 Dock 开、菜单栏关），选择会被记住
-        let dockBox = NSButton(checkboxWithTitle: "Dock 图标读数", target: self,
-                               action: #selector(toggleDockCheckbox(_:)))
-        dockBox.frame = NSRect(x: 24, y: 26, width: 130, height: 20)
-        content.addSubview(dockBox)
-        dockCheckbox = dockBox
-        trackBelow(dockBox)
-
-        let menuBox = NSButton(checkboxWithTitle: "菜单栏读数", target: self,
-                               action: #selector(toggleMenuBarCheckbox(_:)))
-        menuBox.frame = NSRect(x: 160, y: 26, width: 120, height: 20)
-        content.addSubview(menuBox)
-        menuCheckbox = menuBox
-        trackBelow(menuBox)
-        syncToggleStates()
-
-        self.window = w
-        baseFrame = w.frame
-    }
-
-    @objc private func quitApp() { NSApp.terminate(nil) }
-
-    @objc private func toggleMenuBarCheckbox(_ sender: NSButton) {
-        (NSApp.delegate as? AppDelegate)?.setMenuBarVisible(sender.state == .on)
-        syncToggleStates()
-    }
-
-    @objc private func toggleDockCheckbox(_ sender: NSButton) {
-        (NSApp.delegate as? AppDelegate)?.setDockVisible(sender.state == .on)
-        syncToggleStates()
-    }
-
-    /// 勾选状态跟着实际状态走（菜单栏菜单里改过也要同步回窗口）
-    private func syncToggleStates() {
-        guard let d = NSApp.delegate as? AppDelegate else { return }
-        dockCheckbox?.state = d.dockIconVisible ? .on : .off
-        menuCheckbox?.state = d.menuBarVisible ? .on : .off
-    }
-
-    /// 4 秒一次把引擎探测丢到后台；探测期间 UI 继续显示上一次的结果
-    private func triggerEngineProbeIfNeeded() {
-        guard !engineProbeBusy else { return }
-        guard cachedModels == nil || Date().timeIntervalSince(modelSampledAt) >= 4 else { return }
-        engineProbeBusy = true
-        engineQueue.async { [weak self] in
-            guard let self = self else { return }
-            let snap = self.modelSampler.refresh()
-            DispatchQueue.main.async {
-                self.cachedModels = snap
-                self.modelSampledAt = Date()
-                self.engineProbeBusy = false
-                self.refresh()          // 用新缓存重画（refresh 只在主线程跑）
-            }
-        }
-    }
-
-    func refresh() {
-        guard window != nil else { return }
-        syncToggleStates()
-
-        if let s = sampleProvider?() {
-            let gpu = s.gpu.map { String(format: "%.0f%%", $0) } ?? "—"
-            summaryLabel?.stringValue = String(
-                format: "CPU %.0f%% · GPU %@ · 内存 %.0f%%（%.1f/%.0f GB）",
-                s.cpu, gpu, s.memPct, s.memUsedGB, s.memTotalGB)
-            breakdownLabel?.stringValue = String(
-                format: "内存分解：应用 %.1f + 联动 %.1f + 压缩 %.1f ｜ 缓存 %.1f ｜ 空闲 %.1f GB",
-                s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memCachedGB, s.memFreeGB)
-
-            let sw = sampler.swapUsage()
-            if sw.totalGB > 0.01 {
-                swapLabel?.stringValue = String(
-                    format: "Z 压缩+换页 %.0f%%　｜　已换页 %.1f / 上限 %.1f GB",
-                    s.memPressurePct, sw.usedGB, sw.totalGB)
-            } else {
-                swapLabel?.stringValue = String(format: "Z 压缩+换页 %.0f%%　｜　未使用换页",
-                                                s.memPressurePct)
-            }
-        }
-
-        // 本机 AI 引擎一栏：探测丢后台（15 个端口 × 各家 API 试探可能耗时），
-        // 主线程只渲染缓存结果 —— 绝不卡窗口。
-        triggerEngineProbeIfNeeded()
-        let models = cachedModels ?? ModelSnapshot()
-        applyModelLayout(rowCount: models.rows.count)
-        for i in 0..<modelRowLimit {
-            guard i < modelNameLabels.count else { continue }
-            if i < models.rows.count {
-                let r = models.rows[i]
-                modelNameLabels[i].stringValue = r.name + (r.shared ? " *" : "")
-                modelNameLabels[i].textColor = r.state == .failed ? .secondaryLabelColor : .labelColor
-                modelStateLabels[i].stringValue = r.state.text
-                modelStateLabels[i].textColor = r.state.color
-                modelMemLabels[i].stringValue = r.memGB > 0.01 ? String(format: "%.2f GB", r.memGB) : "—"
-                modelMemLabels[i].textColor = r.state == .failed ? .secondaryLabelColor : .labelColor
-                let tip = r.note
-                modelNameLabels[i].toolTip = tip
-                modelStateLabels[i].toolTip = tip
-                modelMemLabels[i].toolTip = tip
-            } else {
-                modelNameLabels[i].stringValue = i == 0 ? "未发现本地模型进程" : ""
-                modelNameLabels[i].textColor = .tertiaryLabelColor
-                modelStateLabels[i].stringValue = ""
-                modelMemLabels[i].stringValue = ""
-                modelNameLabels[i].toolTip = nil
-                modelStateLabels[i].toolTip = nil
-                modelMemLabels[i].toolTip = nil
-            }
-        }
-        var footParts: [String] = []
-        if models.enginesFound == 0 && models.rows.isEmpty {
-            footParts.append("没探测到本地引擎")
-        }
-        if models.rows.count > modelRowLimit {
-            let hidden = models.rows.suffix(models.rows.count - modelRowLimit)
-            let hiddenUncertain = hidden.filter { $0.state == .uncertain }.count
-            footParts.append("另有 \(hidden.count) 个未显示"
-                             + (hiddenUncertain > 0 ? "（含 \(hiddenUncertain) 个待确认）" : ""))
-        }
-        if models.rows.contains(where: { $0.shared }) { footParts.append("* 同一进程托管多个模型（单个模型的内存见行内提示）") }
-        // 未加载清单：按脚注实际可用宽度装配，塞不下就收成「等 N 个」。
-        // 之前整串直接拼上，模型名一长就被省略号吃掉（尾部的模型看着像没被识别到）。完整清单进悬停提示。
-        if !models.unloaded.isEmpty {
-            let font = NSFont.systemFont(ofSize: 10.5)
-            func textWidth(_ s: String) -> CGFloat {
-                (s as NSString).size(withAttributes: [.font: font]).width
-            }
-            let othersWidth = footParts.isEmpty ? 0 : textWidth(footParts.joined(separator: "　")) + 21
-            let budget = max(140, 412 - othersWidth)   // 412 = 脚注框宽
-            let names = models.unloaded
-            var text = "未加载："
-            var shown = 0
-            for (i, n) in names.enumerated() {
-                let candidate = i == 0 ? n : "、" + n
-                let suffix = names.count - (i + 1) > 0 ? " 等 \(names.count) 个" : ""
-                guard textWidth(text + candidate + suffix) <= budget else { break }
-                text += candidate
-                shown += 1
-            }
-            let unloadedNote: String
-            if shown == 0 {
-                unloadedNote = "未加载 \(names.count) 个（悬停看全部）"
-            } else if shown < names.count {
-                unloadedNote = text + " 等 \(names.count) 个"
-            } else {
-                unloadedNote = text
-            }
-            footParts.insert(unloadedNote, at: 0)
-        }
-        modelFootnote?.stringValue = footParts.joined(separator: "　")
-        modelFootnote?.toolTip = models.unloaded.isEmpty ? nil : models.unloaded.joined(separator: "、")
-
-        let cpu = sampler.topCPU()
-        let gpu = sampler.topGPU()
-        let mem = sampler.topMemory()
-
-        for (section, stats) in [(0, cpu), (1, gpu), (2, mem)] {
-            for i in 0..<3 {
-                let idx = section * 3 + i
-                guard idx < nameLabels.count else { continue }
-                if i < stats.count {
-                    let st = stats[i]
-                    nameLabels[idx].stringValue = st.name
-                    switch section {
-                    case 0:  valueLabels[idx].stringValue = String(format: "%.1f%%", st.value)
-                    case 1:  valueLabels[idx].stringValue = String(format: "%.1f%%", st.value)
-                    default: valueLabels[idx].stringValue = String(format: "%.2f GB",
-                                                                   st.value / 1_073_741_824)
-                    }
-                    valueLabels[idx].textColor = section == 2
-                        ? .labelColor
-                        : levelColor(min(100, st.value))
-                } else {
-                    nameLabels[idx].stringValue = "—"
-                    valueLabels[idx].stringValue = ""
-                }
-            }
-        }
-    }
-}
-
-// ============================================================
 // MARK: - AppDelegate
 // ============================================================
 
@@ -991,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let memSampler = MemorySampler()
     private let gpuSampler = GPUSampler()
     private let status = StatusItemController()
-    private var procWindow: ProcessWindowController!
+    private var mainWindow: MainWindowController!
     private var invWindow: InventoryWindowController!
     private var timer: Timer?
     private var animator: Timer?
@@ -1003,8 +595,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDrawn = Sample(cpu: -1, gpu: -1, memPct: -1, memUsedGB: 0, memTotalGB: 0)
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        procWindow = ProcessWindowController()
-        procWindow.sampleProvider = { [weak self] in self?.target ?? Sample() }
+        // 程序本体被改动过就提示一次（只报告不阻断；见 src/Doctor.swift）
+        Doctor.warnIfTampered()
+        mainWindow = MainWindowController()
+        mainWindow.sampleProvider = { [weak self] in self?.display ?? Sample() }
         invWindow = InventoryWindowController()
 
         // GPU 需要两次采样才算得出占用率，先建基准
@@ -1034,6 +628,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let a = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.animate() }
         RunLoop.main.add(a, forMode: .common)
         animator = a
+
+        // 兜底：从 LaunchServices 拉起时系统会补发 reopen 事件，但「点图标没反应」
+        // 这类情况真的会发生（无窗口实例占着单实例锁、或系统只激活不重开）。
+        // 启动后若一个可见窗口都没有，就直接把主窗口露出来。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            if NSApp.windows.allSatisfy({ !$0.isVisible }) {
+                self.mainWindow.show(page: 0)
+            }
+        }
     }
 
     private func buildMenu() {
@@ -1051,9 +655,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winswitch.tag = 102
         menu.addItem(winswitch)
 
-        let openItem = NSMenuItem(title: "打开进程排行窗口", action: #selector(openProcWindow(_:)), keyEquivalent: "d")
+        let openItem = NSMenuItem(title: "打开主窗口", action: #selector(openProcWindow(_:)), keyEquivalent: "d")
         openItem.target = self
         menu.addItem(openItem)
+
+        let aiItem = NSMenuItem(title: "打开 AI 管理", action: #selector(openAIManager(_:)), keyEquivalent: "2")
+        aiItem.target = self
+        menu.addItem(aiItem)
 
         let invItem = NSMenuItem(title: "打开本机模型清单", action: #selector(openInventoryWindow(_:)), keyEquivalent: "i")
         invItem.target = self
@@ -1085,6 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         target.memCompressedGB = d.compressedGB
         target.memCachedGB = d.cachedGB
         target.memFreeGB = d.freeGB
+        target.memDeduped = d.deduped
         // 内存压力水位 = (被压缩 + 被换出) ÷ 物理内存总量
         // 含义：系统为了腾地方，把多大比例的物理内存压起来或挪到磁盘了
         let swapGB = swapUsedGB()
@@ -1110,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         s.memCachedGB = target.memCachedGB
         s.memFreeGB = target.memFreeGB
         s.swapUsedGB = target.swapUsedGB
+        s.memDeduped = target.memDeduped
         if abs(s.memPressurePct - target.memPressurePct) < 0.2 {
             s.memPressurePct = target.memPressurePct
         }
@@ -1158,7 +768,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openProcWindow(_ sender: Any?) {
-        procWindow.show()
+        mainWindow.show(page: 0)
+    }
+
+    @objc private func openAIManager(_ sender: Any?) {
+        mainWindow.show(page: 1)
     }
 
     /// 关于：署名与版本（自检模式不弹）
@@ -1213,7 +827,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 点 Dock 图标（有/无窗口）都弹出进程排行窗口
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        procWindow.show()
+        mainWindow.show(page: 0)
         return true
     }
 
@@ -1225,6 +839,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // ============================================================
 // MARK: - 入口
 // ============================================================
+
+// ---- 管理 API：给用户自己的 AI 用（一次一个 JSON 请求，一行 JSON 回答）----
+// 例：Dockolate --api '{"op":"model.add","model":{…}}'
+// 详见 docs/CLI_API.md；不依赖 GUI 是否在跑，也不碰程序本体。
+if CommandLine.arguments.contains(where: { $0 == "--api" || $0.hasPrefix("--api=") }) {
+    exit(AdminAPI.run(arguments: CommandLine.arguments))
+}
+
+// ---- 自检：--doctor [--text]（默认 JSON）----
+if CommandLine.arguments.contains("--doctor") {
+    exit(Doctor.run(asJSON: !CommandLine.arguments.contains("--text")))
+}
+
+// ---- 自检模式：--self-test-manager 管理器判据自检（分类 / 估算 / 三色 / 配方 / 日志解析）----
+if CommandLine.arguments.contains("--self-test-manager") {
+    _ = NSApplication.shared
+    exit(Int32(SelfTest().run()))
+}
 
 // ---- 自检模式：--dump 采样一次并把 Dock 图标写成 PNG（用于无屏幕录制权限时的实测验证）----
 // ---- 自检模式：--procs 打印三榜（窗口内容的数据源），用于无 GUI 时验证采样 ----
@@ -1244,6 +876,159 @@ if CommandLine.arguments.contains("--procs") {
     for s in mem { print(String(format: "  %-32s %6.2f GB  (pid %d)", (s.name as NSString).utf8String!, s.value / 1_073_741_824, s.pid)) }
     let sw = sampler.swapUsage()
     print(String(format: "=== 换页 swap：%.1f / %.1f GB ===", sw.usedGB, sw.totalGB))
+    exit(0)
+}
+
+// ---- 自检模式：--mgmt-list 打印管理器清单；--mgmt-action=launch:<id> / stop:<id> 真跑一次动作 ----
+// 与界面共用同一套 ModelCatalog / ModelActionRunner：这是「拉起 / 卸载」链路的无 GUI 验收面。
+// ---- 中枢后台（M0：只采样 + 落状态文件，不调度、不碰引擎）----
+// 设计见 projects/01_本机模型栈/docs/本地模型中枢_方案v2.md
+if CommandLine.arguments.contains("--hub") {
+    let backgroundApp = NSApplication.shared
+    // 关键：后台中枢必须声明为 .prohibited。
+    // 否则它会被当成「已经在跑的 Dockolate」，用户点图标时单实例逻辑只去 activate 它，
+    // 而它没有窗口 —— 表现就是「点图标打不开」。
+    backgroundApp.setActivationPolicy(.prohibited)
+    var interval: TimeInterval = 5
+    if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--interval=") }),
+       let v = Double(a.replacingOccurrences(of: "--interval=", with: "")) {
+        interval = v
+    }
+    HubDaemon(interval: interval).run()
+}
+// 策略写回自检：把某条策略的 priority +1 写回，读出来核对，再恢复。
+// 用真实 registry.json 走一遍读写路径（savePolicy 会先备份），比手工点界面可重复。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--policy-selftest=") }) {
+    let id = a.replacingOccurrences(of: "--policy-selftest=", with: "")
+    guard var pol = HubRegistry.load().entries[id] else {
+        print("找不到策略：\(id)")
+        exit(2)
+    }
+    let original = pol.priority
+    pol.priority = original + 1
+    do {
+        try HubRegistry.savePolicy(pol)
+    } catch {
+        print("写回失败：\(error.localizedDescription)")
+        exit(1)
+    }
+    let written = HubRegistry.load().entries[id]?.priority
+    pol.priority = original
+    try? HubRegistry.savePolicy(pol)
+    let restored = HubRegistry.load().entries[id]?.priority
+    let ok = (written == original + 1) && (restored == original)
+    print("priority \(original) → 写入后 \(written.map(String.init) ?? "nil") → 恢复后 \(restored.map(String.init) ?? "nil")")
+    print(ok ? "策略写回自检通过" : "策略写回自检失败")
+    exit(ok ? 0 : 1)
+}
+if CommandLine.arguments.contains("--hub-status") {
+    HubDaemon.printStatus()
+    exit(0)
+}
+
+// ---- 互斥前置检查（M1a）：默认拒绝，--ask 才弹窗问人 ----
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--ensure=") }) {
+    _ = NSApplication.shared
+    let target = a.replacingOccurrences(of: "--ensure=", with: "")
+    let ask = CommandLine.arguments.contains("--ask")
+    let force = CommandLine.arguments.contains("--switch")
+    let json = CommandLine.arguments.contains("--json")
+    exit(HubEnsure.run(target: target, ask: ask, forceSwitch: force, asJSON: json))
+}
+
+// ---- 只卸并等内存还回来（M1b）：--release=<模型> ----
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--release=") }) {
+    _ = NSApplication.shared
+    let target = a.replacingOccurrences(of: "--release=", with: "")
+    exit(HubEnsure.release(target: target, asJSON: CommandLine.arguments.contains("--json")))
+}
+
+if CommandLine.arguments.contains("--mgmt-list")
+    || CommandLine.arguments.contains(where: { $0.hasPrefix("--mgmt-action=") }) {
+    _ = NSApplication.shared
+    let cfg = LauncherConfig.load()
+    let watcher = EngineWatcher()
+    _ = watcher.refresh()
+    Thread.sleep(forTimeInterval: 2.0)
+    let runtime = watcher.refresh()
+    var invCfg = ModelInventory.Config()
+    invCfg.extraDirs = cfg.extraScanRoots
+    let inv = ModelInventory()
+    inv.engineDirs = runtime.modelDirs
+    let units = inv.scan(config: invCfg)
+    let roots = (invCfg.includeDefaults ? ModelInventory.defaultRoots().map { $0.path } : [])
+        + invCfg.extraDirs + runtime.modelDirs
+    let entries = ModelCatalog.build(units: units, runtime: runtime, config: cfg,
+                                     observed: ObservedMemory(), roots: roots)
+
+    if CommandLine.arguments.contains("--mgmt-list") {
+        let reg = HubRegistry.load()
+        print("配方：\(cfg.recipes.count) 条　｜　清单：\(entries.count) 个　｜　策略：\(reg.count) 条（\(reg.source)）")
+        // 预算明细：可用口径 = 总 − wired − 压缩 − 已驻留模型 − 预留
+        let memS = MemorySampler()
+        let r = memS.next()               // (pct, usedGB, totalGB)
+        let mm = memS.last                // 细项
+        let residentSum = entries
+            .filter { [.running, .idle, .loading].contains($0.state) }
+            .reduce(0.0) { $0 + $1.memGB }
+        let b = MemoryBudget(totalGB: r.totalGB, usedGB: r.usedGB, reserveGB: cfg.reserveGB,
+                             wiredGB: mm.wiredGB, compressedGB: mm.compressedGB,
+                             modelResidentGB: residentSum)
+        print(String(format: "预算：总 %.1f − wired %.1f − 压缩 %.1f − 已驻留模型 %.1f − 预留 %.0f = 可用 %.1f GB（旧口径 %.1f）",
+                     b.totalGB, b.wiredGB, b.compressedGB, residentSum, b.reserveGB,
+                     b.availableGB, max(0, b.totalGB - b.usedGB - b.reserveGB)))
+        let ms = MetricsStore()
+        for e in entries {
+            print(String(format: "  %-46s %-8s %-34s %6.1f GB 盘%6.1f %@ %@",
+                         (e.id as NSString).utf8String!,
+                         (e.category.title as NSString).utf8String!,
+                         (String(e.title.prefix(32)) as NSString).utf8String!,
+                         e.estMemGB, e.diskGB, e.state.text,
+                         e.canLaunch ? "可拉起" : (e.blockedReason ?? "")))
+            if let pol = reg.entry(for: e.id, recipe: e.recipe?.id) {
+                print("      ↳ 策略 \(pol.id) · 驻留=\(pol.resident) 自启=\(pol.autoStart) 重拉=\(pol.restartOnCrash) 互斥=\(pol.mutexWith) 对外=\(pol.exposed)")
+            }
+            if let row = runtime.rows.first(where: { $0.port == e.port && !e.runtimeName.isEmpty && $0.name == e.runtimeName }),
+               let m = ms.metric(for: row, recipe: e.recipe) {
+                let up = m.uptime.map(prettyUptime) ?? "—"
+                if let md = m.media {
+                    var line = "运行 " + up
+                    for bit in mediaSummaryLine(md) { line += " · " + bit }
+                    print("      ↳ " + line + " · " + m.source + (m.note.isEmpty ? "" : "（" + m.note + "）"))
+                } else {
+                    let pf = m.prefillTokS.map { String(format: "%.0f", $0) } ?? "—"
+                    let dc = m.decodeTokS.map { String(format: "%.1f", $0) } ?? "—"
+                    print("      ↳ 运行 \(up) · prefill \(pf) tok/s · decode \(dc) tok/s · \(m.requests) 请求 · 输入/\(m.tokensIn) 输出/\(m.tokensOut) · \(m.source)")
+                }
+            }
+        }
+        exit(0)
+    }
+    guard let a = CommandLine.arguments.first(where: { $0.hasPrefix("--mgmt-action=") }) else { exit(2) }
+    let spec = a.replacingOccurrences(of: "--mgmt-action=", with: "")
+    let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+    guard parts.count == 2, let entry = entries.first(where: { $0.id == parts[1] }) else {
+        print("找不到条目：\(spec)")
+        exit(2)
+    }
+    let runner = ModelActionRunner()
+    if parts[0] == "launch" { runner.launch(entry) } else { runner.stop(entry) }
+    var last = ""
+    for _ in 0..<600 {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        let st = runner.state(for: entry.id)
+        let desc: String
+        switch st?.phase {
+        case .none: desc = "(等待中)"
+        case .some(.launching(let t)): desc = "拉起中 " + prettyUptime(Date().timeIntervalSince(t))
+        case .some(.stopping(let t)): desc = "停止中 " + prettyUptime(Date().timeIntervalSince(t))
+        case .some(.failed(let m)): desc = "失败：" + m
+        case .some(.idle): desc = "完成：" + (st?.detail ?? "")
+        }
+        if desc != last { print("state: " + desc); last = desc }
+        if let s = st, !s.phase.isBusy, s.finishedAt != nil { break }
+    }
+    if let st = runner.state(for: entry.id) { print("detail: \(st.detail)") }
     exit(0)
 }
 
@@ -1302,6 +1087,7 @@ if CommandLine.arguments.contains("--dump") {
     s.memAppGB = d.appGB; s.memWiredGB = d.wiredGB; s.memCompressedGB = d.compressedGB
     s.memCachedGB = d.cachedGB; s.memFreeGB = d.freeGB
     s.swapUsedGB = swapUsedGB()
+    s.memDeduped = d.deduped
     s.memPressurePct = d.totalGB > 0 ? min(100, (d.compressedGB + s.swapUsedGB) / d.totalGB * 100) : 0
 
     // --mock=CPU,GPU,MEM：强制指定显示数值，用于验收边界态（如 100/100/100）
@@ -1319,9 +1105,15 @@ if CommandLine.arguments.contains("--dump") {
                  s.gpu.map { String(format: "%.1f", $0) } ?? "nil",
                  s.memPct, s.memUsedGB, s.memTotalGB, gpuName()))
     if CommandLine.arguments.contains("--verbose") {
-        print(String(format: "  mem: 应用 %.1f + 联动 %.1f + 压缩 %.1f = %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
-                     s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memUsedGB,
-                     s.memCachedGB, s.memFreeGB))
+        if s.memDeduped {
+            print(String(format: "  mem: 应用 %.1f / 联动 %.1f 有重叠（GPU 显存）⇒ 取较大者 %.1f + 压缩 %.1f = %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
+                         s.memAppGB, s.memWiredGB, max(s.memAppGB, s.memWiredGB), s.memCompressedGB,
+                         s.memUsedGB, s.memCachedGB, s.memFreeGB))
+        } else {
+            print(String(format: "  mem: 应用 %.1f + 联动 %.1f + 压缩 %.1f = %.1f GB ｜ 文件缓存 %.1f GB（可回收）｜ 空闲 %.1f GB",
+                         s.memAppGB, s.memWiredGB, s.memCompressedGB, s.memUsedGB,
+                         s.memCachedGB, s.memFreeGB))
+        }
         print(String(format: "  Z(压缩+换页水位): (%.1f 压缩 + %.1f 换页) / %.0f = %.1f%%",
                      s.memCompressedGB, s.swapUsedGB, s.memTotalGB, s.memPressurePct))
     }
@@ -1376,6 +1168,56 @@ if CommandLine.arguments.contains("--check-adapters") {
     }
     let ok = t.sources.allSatisfy { $0.ok }
     exit(ok ? 0 : 1)
+}
+
+// ---- 自检模式：--media=<端口> 打印媒体指标（生图 / 视频的轮次与耗时）----
+// 界面之外的第二验收面：不开窗口、不受 3 秒刷新影响，可以配合 --watch=秒数 盯一轮跑完。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--media=") }) {
+    let spec = a.replacingOccurrences(of: "--media=", with: "")
+    let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+    let cfg = LauncherConfig.load()
+    var recipe: LaunchRecipe? = nil
+    var port = 0
+    if parts.count == 2, let p = Int(parts[1]) {
+        port = p
+        recipe = cfg.recipes.first { ($0.port ?? 0) == p || $0.media?.lowercased() == parts[0].lowercased() }
+    } else if let p = Int(spec) {
+        port = p
+        recipe = cfg.recipes.first { ($0.port ?? 0) == p }
+    } else {
+        recipe = cfg.recipes.first { $0.id == spec }
+        port = recipe?.port ?? 0
+    }
+    guard let r = recipe else { print("用法：--media=<端口>（registry.json 里要有对应配方）"); exit(2) }
+    guard let kind = r.mediaKind else {
+        print("配方 \(r.id) 没声明 media —— 在 registry.json 里给它加 \"media\": \"comfyui\" 或 \"mlxserve\"")
+        exit(2)
+    }
+    let store = MediaMetricsStore()
+    print("媒体探针：来源 \(r.media ?? "—") · 类型 \(kind.rawValue) · 端口 \(port)· 配方 \(r.id)")
+    let watch = CommandLine.arguments.first(where: { $0.hasPrefix("--watch=") })
+        .flatMap { Double($0.replacingOccurrences(of: "--watch=", with: "")) } ?? 0
+    let deadline = Date().addingTimeInterval(max(0, watch))
+    var lastLine = ""
+    while true {
+        if let probe = store.probe(for: r, port: port), let m = probe.refresh(now: Date()) {
+            let head = "\(m.kind.rawValue) · 轮次 \(m.rounds)"
+            var line = head
+            for bit in mediaSummaryLine(m) where !bit.hasPrefix("已出") { line += " · " + bit }
+            if line != lastLine {
+                print(line)
+                for d in mediaDetailLines(m) { print("  " + d) }
+                lastLine = line
+            }
+        } else {
+            print("探针不可用：引擎未运行 / 日志不可读（媒体来源 \(r.media ?? "—")，端口 \(port)）")
+            if watch <= 0 { exit(1) }
+        }
+        fflush(stdout)
+        if Date() >= deadline { break }
+        Thread.sleep(forTimeInterval: 1.0)
+    }
+    exit(0)
 }
 
 // ---- 自检模式：--probe=<port> 打印一个端口的探测细节（给用户反馈用，不含取值）----
@@ -1574,12 +1416,16 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-inventory="
     exit(ok ? 0 : 1)
 }
 
-// ---- 自检模式：--shot-panel=<path> 把主窗口离屏渲染成 PNG ----
+// ---- 自检模式：--shot-panel=<path> / --shot-manager=<path> 把窗口离屏渲染成 PNG ----
 // 没有屏幕录制权限时（screencapture 报 could not create image from display），
 // 这是唯一能「看到」界面的验收面：进程内 cacheDisplay，像素来自真实视图树。
-if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-panel=") }) {
+// --demo-models 注入一份覆盖各种状态的演示数据（四态模型 / 三色可行性 / 一个工作组），
+// 现场很难同时撞上这些状态，验收配色与文案时用它。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-panel=") || $0.hasPrefix("--shot-manager=") || $0.hasPrefix("--shot-pool=") }) {
     _ = NSApplication.shared
-    let out = a.replacingOccurrences(of: "--shot-panel=", with: "")
+    let isPool = a.hasPrefix("--shot-pool=")
+    let isManager = a.hasPrefix("--shot-manager=") || isPool
+    let out = a.replacingOccurrences(of: isPool ? "--shot-pool=" : (isManager ? "--shot-manager=" : "--shot-panel="), with: "")
     let cpuS = CPUSampler()
     let memS = MemorySampler()
     let gpuS = GPUSampler()
@@ -1596,33 +1442,70 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-panel=") })
     s.memAppGB = d.appGB; s.memWiredGB = d.wiredGB; s.memCompressedGB = d.compressedGB
     s.memCachedGB = d.cachedGB; s.memFreeGB = d.freeGB
     s.swapUsedGB = swapUsedGB()
+    s.memDeduped = d.deduped
     s.memPressurePct = d.totalGB > 0 ? min(100, (d.compressedGB + s.swapUsedGB) / d.totalGB * 100) : 0
 
-    let fixed = s
-    let ctl = ProcessWindowController()
-    ctl.sampleProvider = { fixed }
-    ctl.show()
-    // 引擎探测走后台队列 + 回主队列：主队列必须有 runloop 运行才会执行，sleep 不行
-    RunLoop.main.run(until: Date().addingTimeInterval(3.0))
-    // --demo-models：注入覆盖全状态的快照（加载中 / 故障 现场很难正好撞上），用于验收配色与文案
-    if CommandLine.arguments.contains("--demo-models") {
-        var demo = ModelSnapshot()
-        demo.enginesFound = 1
-        demo.rows = [
-            ModelRow(name: "Some-New-Video-Model-8bit", memGB: 28.06, state: .running,
-                     note: "引擎 A · 正在处理请求"),
-            ModelRow(name: "org/Another-New-Weight-Q5", memGB: 12.30, state: .loading,
-                     note: "引擎 A · 权重正在加载，暂不接请求"),
-            ModelRow(name: "Unmapped-State-Model", memGB: 0, state: .uncertain,
-                     note: "引擎 A · 引擎自报状态「warmup-x」，这个值还不认识"),
-            ModelRow(name: "Broken-Weight", memGB: 0, state: .failed,
-                     note: "引擎 A · 该模型加载失败（服务端日志有原因）"),
-        ]
-        demo.unloaded = ["Unused-Weight-A", "Unused-Weight-B", "Unused-Weight-C", "Unused-Weight-D"]
-        ctl.selfCheckInjectModels(demo)
+    // --demo-home：把读数换成一组与真机无关的演示值（截图用于 README / 文档，
+    // 不能把本机的物理内存总量、占用率这类运行细节带出去）
+    var fixed = s
+    if CommandLine.arguments.contains("--demo-home") {
+        var d = Sample()
+        d.cpu = 13
+        d.gpu = 41
+        d.memPct = 56
+        d.memTotalGB = 64
+        d.memUsedGB = 35.8            // 与 56% / 64 GB 自洽（截图不能自相矛盾）
+        d.memAppGB = 27.5
+        d.memWiredGB = 4.3
+        d.memCompressedGB = 4.0
+        d.memCachedGB = 16.9
+        d.memFreeGB = 7.2
+        d.memPressurePct = 9.0
+        d.swapUsedGB = 0.4
+        fixed = d
     }
-    let ok = ctl.selfCheckRenderPNG(to: out)
+    let ctl = MainWindowController()
+    ctl.sampleProvider = { fixed }
+    ctl.show(page: isManager ? 1 : 0)
+
+    // --shot-width=N：按指定宽度渲染，用来验收卡片流在不同宽度下的换列（420 最窄 / 900 宽）
+    var shotWidth: CGFloat = 0
+    if let wArg = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-width=") }),
+       let w = Double(wArg.replacingOccurrences(of: "--shot-width=", with: "")) {
+        shotWidth = CGFloat(w)
+    }
+    if shotWidth > 200 {
+        ctl.setShotWidth(shotWidth)
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+    if shotWidth > 200 { ctl.setShotWidth(shotWidth) }
+    // 引擎探测 / 扫盘走后台队列 + 回主队列：主队列必须有 runloop 运行才会执行，sleep 不行
+    RunLoop.main.run(until: Date().addingTimeInterval(isManager ? 7.0 : 3.0))
+    if CommandLine.arguments.contains("--demo-models") {
+        ctl.selfCheckInjectDemo()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    }
+    // --shot-tall：把窗口临时拉高到能装下整页（README 用的长图），默认按窗口原高截
+    // --shot-height=N：直接给像素高度（内容更长时用，验收某个远在下方的分组）
+    var tall: CGFloat? = CommandLine.arguments.contains("--shot-tall")
+        ? (isManager ? 1180 : 900) : nil
+    if let hArg = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-height=") }),
+       let h = Double(hArg.replacingOccurrences(of: "--shot-height=", with: "")), h > 200 {
+        tall = CGFloat(h)
+    }
+    let ok = ctl.selfCheckRenderPNG(to: out, page: isManager ? 1 : 0, tallHeight: tall)
     print(ok ? "panel=\(out)" : "panel=失败（窗口没建起来？）")
+    if isPool {
+        let poolPath = out
+        if CommandLine.arguments.contains("--demo-pool") || CommandLine.arguments.contains("--demo-pool=overflow") {
+            ctl.selfCheckPoolDemo(overflow: CommandLine.arguments.contains("--demo-pool=overflow"))
+        }
+        let poolOK = ctl.selfCheckRenderPool(to: poolPath, width: shotWidth > 200 ? shotWidth : 680)
+        print(poolOK ? "pool=\(poolPath)" : "pool=失败（池视图没建起来？）")
+        if CommandLine.arguments.contains("--dump-pool") { ctl.selfCheckDumpPool() }
+        exit(poolOK ? 0 : 1)
+    }
+    if CommandLine.arguments.contains("--dump-tiles") { ctl.selfCheckDumpTiles() }
     exit(ok ? 0 : 1)
 }
 
@@ -1634,13 +1517,13 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--shot-panel=") })
 // 自检模式带参数，不参与。
 var instanceLockFD: Int32 = -1
 if CommandLine.arguments.count <= 1 {
-    let lockDir = NSHomeDirectory() + "/Library/Application Support/Dockolate"
+    let lockDir = SupportDir.dir
     try? FileManager.default.createDirectory(atPath: lockDir, withIntermediateDirectories: true)
     instanceLockFD = open(lockDir + "/instance.lock", O_CREAT | O_RDWR, 0o600)
     if instanceLockFD >= 0, flock(instanceLockFD, LOCK_EX | LOCK_NB) != 0 {
         if let other = NSRunningApplication
             .runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
-            .first(where: { $0.processIdentifier != getpid() }) {
+            .first(where: { $0.processIdentifier != getpid() && $0.activationPolicy == .regular }) {
             other.activate(options: [.activateIgnoringOtherApps])
         }
         exit(0)

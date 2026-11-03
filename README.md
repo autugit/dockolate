@@ -11,7 +11,8 @@
 
 <p align="center">
   <img src="docs/img/dock-icon.png" width="140" alt="Dock icon: four cells, C / G / M / Z water levels">
-  <img src="docs/img/window.png" width="440" alt="Window: local AI models, top processes, memory breakdown">
+  <img src="docs/img/window.png" width="345" alt="Home page: system overview, memory breakdown, local AI models, top processes">
+  <img src="docs/img/manager.png" width="345" alt="AI manager page: runtime metrics per model, local model manager with colour-coded fit, workgroups">
 </p>
 
 No Electron. No dependencies. One `swiftc` invocation. ~2% CPU, ~96 MB RSS.
@@ -26,12 +27,108 @@ No Electron. No dependencies. One `swiftc` invocation. ~2% CPU, ~96 MB RSS.
 └────────┴────────┘
 ```
 
-Click the Dock icon for a window with:
+Click the Dock icon for a card-based window with two pages.
+
+**Home**
 
 - **Local AI models in memory** — sorted by footprint, each line tagged
   **running / loaded-idle / failed**, plus what's downloaded but not loaded;
 - Top 3 processes by **CPU**, **GPU** (per-process, no `sudo`), and **memory**;
 - Memory breakdown (app / wired / compressed / cached / free) and swap usage.
+
+**AI manager**
+
+- **Runtime, per model** — uptime since this load, average **prefill** and
+  **decode** tokens/s, request count, tokens in/out, average TTFT. Read from the
+  engine itself: its JSON `/metrics`, Prometheus `/metrics`
+  (llama.cpp / vLLM / SGLang / TGI), or the engine log — and shown as "—"
+  when there is no honest source.
+  **Image and video engines have no prefill or decode stage**, so they report
+  what actually matters instead: how many images / clips this session produced,
+  how long each one took, and how long the current one has been running (plus
+  step progress for video). ComfyUI is read from `/queue` + `/history` (engine
+  timestamps); H3 / mlx-serve from its log. Rounds that finished before the
+  window opened are still counted, but their duration is marked "not observed"
+  instead of being guessed.
+- **Local model manager** — every weight found on disk, grouped by kind
+  (chat / image / video / audio / embedding / parts), with an estimated memory
+  need and a colour telling you whether the *currently free* memory can fit it:
+  green (comfortable), amber (tight), red (won't fit). Launch or unload from
+  here through small recipes (below).
+- **Memory pool bar** — one horizontal gauge for physical RAM: system / other apps /
+  compressed / reserved / each model's resident part / free. Swap that spilled out is
+  drawn **outside** the bar, so the segments inside always add up to physical memory.
+  A model whose weights are only partly resident grows **above the waterline**: the
+  protruding part is mmap'd to SSD, not "missing memory". A dashed line marks the GPU
+  working-set limit, which on Apple silicon is tighter than RAM.
+- **Policy badges** — each card shows the scheduling contract from `registry.json`
+  (resident / auto-start / restart-on-crash / mutex / exposed / group), listing only
+  what differs from the default so it stays readable in a narrow card.
+- **Admission before launch** — Launch asks the hub first. If the target mutexes with
+  something already loaded you get the blocker by name and an explicit *switch over*
+  choice, instead of a silent eviction.
+- **Adaptive cards** — the manager is a card grid, not a list: 3 / 2 / 1 columns as the
+  window narrows, down to one card per row at ~420 pt.
+
+### The local model hub
+
+`registry.json` is the single source of truth: launch recipes and per-model scheduling
+policy in one file. Two small entry points read it:
+
+| command | what it does |
+|---|---|
+| `Dockolate --ensure=<model> [--json]` | may this model be started right now? exit 0 = yes, 4 = blocked (prints the blockers), 5 = undecidable, 6 = switch failed |
+| `Dockolate --hub-status` | print the last hub sample and how stale it is |
+
+The background sampler ships as a **separate bundle** (`…dockolate.hub`, `LSUIElement`).
+That is not cosmetic: with the same bundle id as the GUI, macOS decides "Dockolate is
+already running" and a Dock click goes to a window-less background process — the app
+looks broken. It only samples; it never supervises engines, so restarting or killing it
+cannot touch a model that is running.
+
+The GUI writes the same state file when the hub is stale (>10 s), so the two never fight
+over it, and the manager header tells you which one is writing
+(`中枢：运行中（后台 / 界面兜底…）`).
+
+### Model manager recipes (optional)
+
+Auto-detection launches nothing by itself. To let the manager start/stop a
+model, describe how in
+`~/Library/Application Support/Dockolate/launchers.json`:
+
+```json
+{
+  "reserveGB": 6,
+  "scanDirs": ["~/my-models"],
+  "recipes": [
+    {
+      "id": "my-chat-model",
+      "title": "My chat model",
+      "engine": "MyEngine",
+      "modelPatterns": ["某 27B 对话模型"],
+      "path": "~/my-models/某 27B 对话模型-4bit",
+      "port": 12345,
+      "category": "chat",
+      "estMemGB": 26,
+      "start": "~/bin/launch-my-model.sh start",
+      "stop":  "~/bin/launch-my-model.sh stop",
+      "log": "~/Library/Logs/my-model/server.log",
+      "metrics": "splash",
+      "readyTimeoutSec": 240
+    }
+  ]
+}
+```
+
+`start` / `stop` accept a shell string or an argv array. A start command may be a
+long-running server (llama.cpp, ComfyUI): readiness is judged by the port, not
+by the command exiting. Ollama (`keep_alive`) and LM Studio (`lms`) work without
+any recipe. Workgroups live in `workgroups.json` next to it.
+
+Colour rule: `estimate ≤ available × 85%` green · `≤ available` amber · above red,
+where `available = physical − used − reserveGB`. The estimate is
+weights-on-disk + a per-kind overhead, replaced by the observed peak once the
+model has actually run on this machine.
 
 ## Why another system monitor
 
@@ -99,7 +196,7 @@ case where a process cannot be identified; anything else can be declared in
 | **Engines that report per-model state in `GET /v1/models`** (e.g. **mlx-serve**) | per-entry `state` / `loaded` / `bytes_resident` → running / loading / not loaded |
 | **llama.cpp / llamafile / KoboldCpp** | `GET /v1/models`, `--model` argv fallback |
 | **vLLM / SGLang / TGI / TensorRT-LLM / LocalAI / TabbyAPI / LiteLLM / OpenLLM / FastChat / Xinference** | `GET /v1/models` |
-| **MLX family: Splash / oMLX / MTPLX / Flash-Next / Swift-Qwen / `mlx-serve` / `mlx_lm.server` / `mlx_vlm.server`** | `GET /v1/models`, argv fallback |
+| **MLX family (Splash / oMLX / MTPLX / mlx-serve / mlx_lm.server / mlx_vlm.server, etc.)** | `GET /v1/models`, argv fallback |
 | **Jan / GPT4All / Docker Model Runner / text-generation-webui** | `GET /v1/models` or process fingerprint |
 | **ComfyUI** | `GET /queue` → `GET /history` → `ckpt_name` / `unet_name` |
 | **A1111 / Forge / reForge / SD.Next / Draw Things** | `GET /sdapi/v1/options` → `sd_model_checkpoint` |
@@ -115,7 +212,7 @@ Adding an engine is one line in `kindHints`; the detection logic does not change
 Custom ports go in `engines.json`.
 
 Some engines run as **two processes** — a small parent that serves HTTP and a child
-that holds the weights and does all the GPU work (Splash 1.4: a 0.4 GB Python parent
+that holds the weights and does all the GPU work (某 MLX 引擎: a 0.4 GB Python parent
 plus a multi-GB `serve-native` child). Memory and the "is it computing" decision are
 aggregated over the **whole process tree**, so the row never reports just the parent.
 
@@ -160,6 +257,10 @@ encoder) and `probePaths`. A malformed file is a warning, never a crash.
 
 ```bash
 Dockolate --check-adapters        # which sources loaded, how many entries, any warnings
+Dockolate --self-test-manager     # classification / estimates / colour rules / recipes / metric parsing
+Dockolate --mgmt-list             # the model-manager catalogue as text (ids, category, estimate, state)
+Dockolate --mgmt-action=launch:<id>   # run one launch/stop through the same code path the buttons use
+Dockolate --shot-manager=/tmp/ai.png  # off-screen render of the AI manager page
 ```
 
 So a new engine, or a new state string from an upgraded engine, can be supported by adding a few
@@ -168,7 +269,7 @@ lines of JSON — no rebuild, no release.
 ### Pre-release self-check
 
 ```bash
-bash tests/verify_all.sh         # engine + identity/inventory + adapters suites, plus a clean-HOME smoke run
+bash tests/verify_all.sh         # engine + identity/inventory + adapters + manager suites, plus a clean-HOME smoke run
 ```
 
 Writes `tests/last_report.json`. The clean-HOME pass proves the app behaves with **no models, no
@@ -322,3 +423,15 @@ The design decisions, the code, the measurements and these documents came out of
 MIT — see [LICENSE](LICENSE).
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
+
+## 给 AI 用的管理接口
+
+```bash
+Dockolate --api '{"op":"help"}'                                    # 全部 op
+Dockolate --api '{"op":"model.add","model":{…}}'                   # 添加模型并配好启停
+Dockolate --api '{"op":"status"}'                                  # 内存 + 在跑的模型
+Dockolate --doctor                                                # 完整性/配置/守护自检
+```
+
+契约与字段说明见 [`docs/CLI_API.md`](docs/CLI_API.md)；发布版安装（`/Applications`，root 只读）
+见 `tools/install-system.command`。

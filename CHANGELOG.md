@@ -4,6 +4,161 @@ All notable changes to Dockolate are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/).
 
+## [1.7.0] — 2026-11-03
+
+### Added — 管理 API（给用户的 AI 用）+ 程序本体完整性
+
+- `--api '<json>'`：一个请求一行 JSON 回答，`model.add/update/remove/launch/stop`、
+  `config.get/set`、`workgroup.*`、`status`、`doctor` 全都有；不依赖 GUI 在跑。
+  写 `registry.json` 走「读原始 JSON → 改字段 → 原子写回」，不丢未知字段，写前留 `.bak`（保留 5 份）。
+  文档：`docs/CLI_API.md`；契约测试：`tests/verify_api.sh`（28 项，全部在临时状态目录里跑）。
+- `--doctor`：清单哈希 + `codesign --verify` + 配置语义 + LaunchAgent + 中枢新鲜度，一次全查。
+- **完整性清单**：`build.sh` 在签名前写 `Contents/Resources/manifest.json`（资源 SHA-256），
+  启动时检测程序本体是否被改过并提示（`DOCKOLATE_SKIP_MANIFEST=1` 可跳过）。
+- **安装留旧版**：`--install` 把旧 bundle 移到 `~/Applications/_prev/`（保留 3 份），
+  `build.sh --rollback` 一键回滚。
+- **系统版安装**：`tools/install-system.command` 装到 `/Applications`，`root:wheel` + 去写权限
+  （同用户进程改不动），配套 `tools/uninstall-system.command`。
+- 状态目录统一走 `SupportDir`，支持 `DOCKOLATE_SUPPORT_DIR` 覆盖（测试隔离用）。
+- 配方语义校验：重复 id / 端口冲突 / 越界端口 / 缺 start / 估算荒谬 ⇒ 显式 warning，`--doctor` 可见。
+
+### Changed — 蓄水池改「敞口水箱」（废弃冰山，2026-11-03 用户裁定）
+
+- 水箱恢复**固定大小、顶部开口**：只画左右两壁与池底，口沿不封线；空闲统一挪到最上面，
+  改**绿色**。
+- 模型浮出池口的部分画**红色**警告，口沿上方给「溢出 N GB（模型名）」气泡。
+- 未载入内存的权重移到池子右侧下方的**「池外」小箱**：颜色与池内同名模型一致、名字相同，
+  不再在池内凸起（冰山方案下线）。
+- 模型改为**按体积竖直叠放**：并排多列会让各列起始高度错开，并在高处留出读不出含义的空白。
+- 色块高度 ≥ 17 pt（按字体量出）才在块内居中写名字，低于阈值不写（名字仍在图例里）。
+- 修**假溢出**：`系统 / 应用与其他 / 压缩` 按权重分「已用 − Σ模型」，不再把模型的 Metal 页
+  既算进 wired 又算进模型列（实测（同机复现）算出 超过物理内存的合计）。
+- 新增验收：`--demo-pool` / `--demo-pool=overflow` 与 `--dump-pool`（导出与绘制同源的几何）。
+
+### Added — 内存蓄水池（冰山视图 · 已被第四版取代）
+
+- 「内存池」条换成**竖直蓄水池**：顶部模型（实心＝已驻留 / 虚线＝未加载）→ 空闲 →
+  沉底（应用与其他 / 系统内核 / 压缩 / **预留在最底**）。
+- **驻留口径改进程树 RSS**：footprint 不计 mmap 权重页（125B：18 GB ↔ RSS 进程树 RSS 的大头），
+  实测让「系统与其他」从 64 GB 降到 20 GB —— 原先那块巨大灰条的真因。
+- **池内不写字**：层名与数字全在右侧图例（配小色块），池内只靠拉开颜色的色块区分。
+- **版式统一**：所有色块圆角矩形（r=3）+ 统一 3 pt 窄缝；薄层（<4 pt）不缩缝、改用 r=1.5，
+  空闲带加 0.8 pt 描边，保证 1–2 GB 的空闲也看得见。
+- **动态头寸**：水池上沿会随「最高的冰山尖」抬高（水面到窗口上沿的距离可变），
+  冰山尖因此永远有地方露出水面；模型不跑时头寸归零。冰山顶用模型色 45% 填充 + 虚线边，
+  空闲改白色（＝空的），避免两者被读反。
+- 缓慢浮动动画：±1.6 pt / 8 fps，只在窗口可见、模型 ≤3、系统未开「减弱动态」时跑。
+- 新增 `--shot-pool=<png>` 单独渲染蓄水池；演示数据改成自洽的一组数字。
+- **页序**：蓄水池置顶（用户令）→ 模型运行时 → 模型管理器 → 工作组；蓄水池与扫盘无关，
+  刷新时就先画（否则开始扫盘那几秒顶部是空的）。
+
+### Changed — AI 管理的模型方块重做（等宽、变高、按状态着色）
+
+- **方块等宽、只改高度**：高度 = 模型大小，走凹函数 `112 + 104·sqrt(size/sizeMax)`（与内存池段长同一条曲线）。
+- **方块表面按状态着色**：蓝＝运行中/待机，琥珀＝拉起中/停止中（边框加粗），绿＝可拉起，
+  黄＝勉强够，红＝内存不足，灰＝不可单独起/未配置启动方式。用不透明混色，浅底上才看得见。
+- **单一砖石网格**：不再按分类切成多段（每段只剩一两行 ⇒ 一列装不下几块）；
+  分类降为方块内的小标签，落块进「当前最矮的列」。
+- **紧凑方块**：高度 < 150 pt 的方块藏副标题与状态行，只留名称/盘占/按钮。
+- **长名换行**：两行显示并在第二行末尾省略，不再靠加宽方块。
+- **页序调整**：模型运行时 → 模型管理器 → 内存池 → 工作组（管理器提到内存池之前，
+  默认窗口里一列从 2 块变成 4 块上下）。
+- 演示数据补了「勉强够」一档（`--demo-models` 才能验收黄色）。
+- 新增 `--dump-tiles`：渲染时导出每个方块的真实 frame（id/y/h/x/w），几何验收不靠看图估。
+
+### Added — 模型运行时里直接卸载；launch 结果落日志
+
+- **「模型运行时」每行右侧新增「卸载」按钮**：内存里正在跑的模型就地卸载，不用再滑到下面的
+  模型管理器里找同一张卡。判据与管理器一致（`canStop`），停止过程中按钮变「停止中…」并禁用，
+  走的仍是同一个 `actions.stop`，所以端口释放 / 内存回收等待与管理器完全一致。
+- **`action-<id>.log` 记录结果行**：`✓ 停止完成（退出码 0，端口已释放）` /
+  `✓ 已拉起（端口 N 就绪）` / `✗ 启动命令退出码 N` + launcher 输出尾巴。此前只记
+  `spawned pid`，launcher 以非 0 退出（例如内存闸门 `return 7`）时日志里没有任何痕迹，
+  用户看到的就是「点了没反应」。
+
+### Added — 生图 / 视频改显示「轮次 · 每轮耗时 · 当前这轮」
+
+图片和视频模型不再显示 prefill / decode（媒体引擎根本没有这两个阶段）。配方里声明
+`"media": "comfyui"` 或 `"media": "mlxserve"` 后，那一行改显示：
+
+- **已出 N 张 / 段**（按产物边界数，不按 HTTP 请求数）
+- **平均 / 最近 / 最快最慢 每轮耗时**（观测到的轮次少于总轮次时标「（观测 N 轮）」）
+- **当前这张 / 这段已用多久**，视频带 `12/20 步`；队列里还有几个（ComfyUI）
+
+来源：ComfyUI 走 `/queue` + `/history`（`execution_start` / `execution_success` 毫秒时间戳，
+轮次与耗时是引擎真值）；H3 / mlx-serve 走引擎日志的三条边界（开轮 / 步 / 出片）。
+观测不到起点的那一轮只计轮次、耗时标「未观测」——不猜数字。
+
+新增 `--media=<端口> [--watch=秒]` 在终端直接验媒体指标；`--shot-height=N` 按任意高度离屏截图。
+
+### Fixed — ComfyUI 在界面里变成两张卡
+
+只有端口、没有引擎名与权重模式的服务配方，之前匹配不上自己的运行行，管理器里同时出现
+「ComfyUI（未运行）」和「ComfyUI（运行中）」；现在按端口认领（自检里有断言）。
+H3 配方的 `log` 路径原本指向一个不存在的文件名，已改成实际写日志的那个。
+
+## [1.6.0] — 2026-10-28
+
+### Changed — 主界面改卡片式，拆成「首页 / AI 管理」两页
+
+窗口不再是一屏手工摆位的读数，而是可滚动的卡片页（`docs/DESIGN.md` 是新的设计权威）：
+首页放三格总览、内存去向堆叠条、本机 AI 模型、进程三榜；AI 管理放运行时指标、模型管理器、工作组。
+布局全部 Auto Layout + `NSStackView`，卡片的宽度跟随页面，不再靠坐标硬凑。
+
+### Added — 模型运行时指标（这一趟跑了多久 / 多快）
+
+每个在内存里的模型可以展开看：**运行时间、平均 prefill、平均 decode、请求数、输入/输出 token、
+平均 TTFT、数据来源**。三条来源按可靠性排序：
+
+- **某 MLX 引擎的 `/metrics`（JSON）** —— `Σprompt_read ÷ Σprompt_ms` 是真 prefill（不含前缀缓存），
+  `Σoutput ÷ Σdecode_ms` 是 decode，`since` 给起算时间；
+- **Prometheus `/metrics`**（llama.cpp / vLLM / SGLang / TGI）—— 累计 token ÷ 累计秒；
+  llama.cpp 需要 `--metrics` 启动，否则界面照实写「指标来源未配置」；
+- **引擎日志**（引擎日志里的 `Done · input … cached … · TTFT … · tok/s`）—— prefill 剔除缓存命中，
+  按本次加载的起始标记切分、增量读取。
+
+拿不到就写「—」，不编数字。另一类引擎日志里的 `reading the prompt` 含缓存命中，
+按它算会得到 1 万 tok/s 的假数，代码里已明确不用它算 prefill。
+
+### Added — 本地模型管理器
+
+- **扫盘识别 + 自动分类**：对话/推理、生图、视频、语音、嵌入/检索、服务、部件；
+  同一模型目录下的主权重与部件（`transformer` + `vae` / `text_encoder`、`IQ3_S` + `mtp`/`mmproj`）
+  归成一行；扫描根下互不相干的散件不硬凑。
+- **内存可行性三色**：估算 = 权重（磁盘实测）+ 开销（按类别 10–22%），跑过一次后改用实测峰值；
+  配方可声明 `estMemGB`（MoE + mmap 的模型，权重文件 ≠ 常驻）。
+  可用 = 物理 − 已用 − 余量（默认 6 GB）：绿 ≤ 可用×85%，黄 ≤ 可用，红 > 可用。
+- **统一拉起 / 卸载**：`launchers.json` 的配方（shell 串或 argv 数组）驱动；
+  Ollama 与 LM Studio 有内置适配器；没有配方的条目明说「未配置启动方式」，
+  运行中的可以「结束进程」。**启动命令可以是常驻进程**（llama.cpp / ComfyUI），
+  以「端口就绪」判成功，超时会清掉没退出的子进程。
+- **工作组**：把几个模型绑成一个名字一起拉起 / 一起停，合计估算同样三色判定能否并存。
+
+### Fixed
+
+- **家族名被版本号截断**：`deletingPathExtension` 把 `某 27B 对话模型-…` 的 `.8-27B-…` 当成扩展名，
+  列表里只剩 `Qwen3`。只剥已知权重扩展名。
+- **带 MTP 头的主权重被误判成「草稿头」**：角色以 `config.json` 的 architectures 为准。
+- **HF 缓存里的符号链接字节数按链接本身算**：整份权重显示「盘 —」，现按目标文件统计。
+- **默认扫描根顺序**：用户目录排在 HF 缓存前面，按 inode 去重时不会把用户目录那份丢掉。
+- **扫盘用过期快照对账**：扫盘只缓存磁盘单元，运行时对账每次探测后重算，不再出现「全都没登记」。
+- **服务类配方的目录不再当扫描根**：否则 ComfyUI 那种目录会变出十几行「几十上百 GB 的模型」。
+- **没拉起过的模型也挂着可点的「卸载」**：判断写成了「有停止配方就算能卸载」，
+  应该只对**真的在内存里**的模型（运行 / 待机 / 加载中）生效。现在未运行的条目只有「拉起」可点，
+  运行中的才亮「卸载」（无 stop 配方时退化为结束进程，tooltip 说明）。
+- **内存口径在 GPU 高负载时虚高**：macOS 26+ 的 Metal 显存既算匿名页也算 wired，
+  「应用 + 联动 + 压缩」会超过物理内存（实测 超过物理内存的合计，已超过物理内存），「可用」永远是 0、
+  管理器把所有模型都判成放不下。现在超过物理内存时改用 `max(应用, 联动) + 压缩`，
+  窗口里两段合并成「应用+显存」并注明重叠；常规机器仍走老口径。
+- **进程识别**：`python -m serve/server.py --engine strata` 这类包装进程现在能认出引擎名
+  （只看 argv[0] 会被端口兜底表叫成 llama.cpp）；参数里的路径只取最后一段
+  （`~/models/...` 曾让 llama.cpp 的进程被认成 MLX）。
+
+### Tests
+
+`tests/verify_manager.sh`（46 条断言：分类 / 估算 / 三色 / 配方匹配 / 引擎日志 / 引擎 JSON），
+并接入 `tests/verify_all.sh` 的发布前矩阵（同时补拍 AI 管理页截图）。
+
 ## [Unreleased]
 
 ## [1.5.0] — 2026-10-28
@@ -183,7 +338,7 @@ bash tests/verify_all.sh        # 三套回归 + 一趟「干净环境」冒烟�
   TensorRT-LLM, LocalAI, Xinference, FastChat, OpenLLM, LiteLLM, TabbyAPI,
   KTransformers, MLC LLM, RamaLama, Petals, GPT4All, Jan, Docker Model Runner,
   text-generation-webui, KoboldCpp), MLX-family engines (Splash, oMLX, MTPLX,
-  Flash-Next, Swift-Qwen, mlx_lm/mlx_vlm servers), image/video (ComfyUI, SwarmUI,
+  MLX 系与 mlx_lm/mlx_vlm 服务), image/video (ComfyUI, SwarmUI,
   Fooocus, InvokeAI, SD.Next, sd.cpp, A1111/Forge/reForge, Draw Things,
   DiffusionBee, Amuse, mflux, Qwen-Image, Flux, Wan, MiniMax, HunyuanVideo,
   LTX-Video, CogVideo) and speech (Whisper, Kokoro, Coqui, ChatTTS, Piper, XTTS).
@@ -198,11 +353,11 @@ bash tests/verify_all.sh        # 三套回归 + 一趟「干净环境」冒烟�
   or gateway port as an engine — a proxy listed as an engine reports the same model
   twice.
 
-### Fixed — engine rows for two-layer engines (Splash 1.4)
+### Fixed — engine rows for two-layer engines (某 MLX 引擎)
 
 - **A model whose weights live in a child process was reported as an idle shell.**
   Each engine row took its memory and activity from whichever process *listens* on
-  the port. Splash 1.4 serves HTTP from a small Python parent (≈0.4 GB) and runs the
+  the port. 某 MLX 引擎 serves HTTP from a small Python parent (≈0.4 GB) and runs the
   model in an `engine/splash serve-native` child (27–40 GB, all the GPU work), so the
   row read **「挂载待机 / 0.41 GB」** while the machine sat at 60–85 % GPU decoding —
   and `splash` was not in the process-name hints at all, so the child was never
