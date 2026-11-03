@@ -92,7 +92,8 @@
 </header>
 
 <figure class="shot">
-  <img src="img/window.png" width="520" alt="Dockolate window listing resident local AI models with their memory footprint, the top processes by CPU / GPU / memory, and the memory breakdown">
+  <img src="img/window.png" width="420" alt="Dockolate home page: system overview, memory breakdown, resident local AI models, and the top processes by CPU / GPU / memory">
+  <img src="img/manager.png" width="420" alt="Dockolate AI manager page: per-model runtime metrics (uptime, prefill/decode tokens per second, requests), a colour-coded local model manager, and workgroups">
   <figcaption>The window: local AI models in memory, top processes, memory breakdown.</figcaption>
 </figure>
 
@@ -119,6 +120,22 @@ Colour climbs blue → green → yellow → red as a level rises; the icon repai
   <div class="card">
     <h3>Per-process GPU, no <code>sudo</code></h3>
     <p>Sums <code>accumulatedGPUTime</code> across <code>AGXDeviceUserClient</code> instances from <code>ioreg</code> instead of calling <code>powermetrics</code> — never a password prompt.</p>
+  </div>
+</div>
+
+<h2><span class="n">03</span>AI manager: measure, then launch</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Runtime, measured not guessed</h3>
+    <p>Per model: uptime since this load, average prefill and decode tokens/s, request count, tokens in/out, average TTFT — read from the engine's own <code>/metrics</code> or its log. No honest source means an em dash, never a guess.</p>
+  </div>
+  <div class="card">
+    <h3>Will it fit, right now?</h3>
+    <p>Every weight found on disk is classified and given an estimated memory need. Green means the currently free memory is comfortable, amber is tight, red will not fit — so you can see what this machine can still start before you touch anything.</p>
+  </div>
+  <div class="card">
+    <h3>Launch, unload, group</h3>
+    <p>Start or stop a model from the same page through a small recipe (a shell string or an argv array), or group several models into a named workgroup that starts and stops together — with the combined footprint judged the same way.</p>
   </div>
 </div>
 

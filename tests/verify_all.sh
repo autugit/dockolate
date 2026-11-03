@@ -45,6 +45,8 @@ echo "可执行文件：$BIN"
 run_suite "引擎探测回归（判据 R1–R3/R6）" bash tests/verify.sh "$BIN"
 run_suite "身份层 + 清单层回归（M2/M3）"   bash tests/verify_identity.sh "$BIN"
 run_suite "签名表外置回归（M4）"          bash tests/verify_adapters.sh "$BIN"
+run_suite "管理器判据回归（v1.6）"        bash tests/verify_manager.sh "$BIN"
+run_suite "管理 API 契约（2026-11-03）"     bash tests/verify_api.sh --bin "$BIN"
 
 echo
 echo "═══ 干净环境冒烟（空 HOME，且不声明任何目录）═══"
@@ -80,8 +82,9 @@ else
 fi
 
 "$BIN" --shot-panel="$TMP/panel.png" > /dev/null 2>&1
+"$BIN" --shot-manager="$TMP/manager.png" > /dev/null 2>&1
 "$BIN" --shot-inventory="$TMP/inv.png" > /dev/null 2>&1
-for f in panel inv; do
+for f in panel manager inv; do
   size=$(stat -f%z "$TMP/${f}.png" 2>/dev/null || echo 0)
   if [[ "$size" -gt 5000 ]]; then
     echo "  ✓ ${f} 窗口仍能渲染（${size} 字节）"; record "干净环境：${f} 渲染" 0 "${size} bytes"

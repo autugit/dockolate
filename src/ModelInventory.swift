@@ -67,7 +67,7 @@ final class ModelInventory {
     /// 读 `~/Library/Application Support/Dockolate/engines.json` 的 `modelDirs`（与端口配置同一个文件）
     static func loadConfig() -> Config {
         var c = Config()
-        let path = NSHomeDirectory() + "/Library/Application Support/Dockolate/engines.json"
+        let path = SupportDir.engines
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return c }
         if let dirs = obj["modelDirs"] as? [String] {
@@ -80,13 +80,16 @@ final class ModelInventory {
     /// 默认扫描根：只放「模型仓库」这种有稳定约定的位置，不猜用户的自定义目录
     static func defaultRoots() -> [(path: String, source: String, layout: Layout)] {
         let home = NSHomeDirectory()
+        // 顺序＝去重时的优先级：用户自己的目录排在最前。
+        // HF 缓存里常常只是指向用户目录的符号链接（同一 inode），按 inode 去重会只留一份 ——
+        // 留「~/mlx-models/xxx」比留「~/.cache/huggingface/hub/models--org--xxx/snapshots/…」好认得多。
         var out: [(String, String, Layout)] = [
-            (home + "/.cache/huggingface/hub", "HF 缓存", .hfCache),
+            (home + "/mlx-models", "用户模型目录", .generic),
+            (home + "/models", "用户模型目录", .generic),
             (home + "/.ollama/models", "Ollama", .ollama),
             (home + "/.lmstudio/models", "LM Studio", .lmStudio),
             (home + "/Library/Application Support/lm-studio/models", "LM Studio", .lmStudio),
-            (home + "/mlx-models", "用户模型目录", .generic),
-            (home + "/models", "用户模型目录", .generic),
+            (home + "/.cache/huggingface/hub", "HF 缓存", .hfCache),
         ]
         // ComfyUI：常见的两处落地位置，存在才扫
         for base in [home + "/ComfyUI/models", home + "/Documents/ComfyUI/models"] {
@@ -116,6 +119,8 @@ final class ModelInventory {
             var found: [DiskUnit] = []
             if root.layout == .ollama {
                 found = scanOllama(path: root.path)
+            } else if root.layout == .hfCache {
+                found = scanHFCache(path: root.path)
             } else {
                 walk(root.path, source: root.source, depth: 0, into: &found)
             }
@@ -159,6 +164,58 @@ final class ModelInventory {
                 if let u = makeUnit(path: path + "/" + child, source: source) { units.append(u) }
             }
         }
+    }
+
+    /// HF 缓存：`models--org--name/snapshots/<hash>/…` —— **一层仓库一个模型**。
+    ///
+    /// 2026-10-31 用户报「界面里有两个 Snapshots」：通用 walk 会把 `snapshots/<hash>` 当成模型，
+    /// 名字退化成目录名 `snapshots`，两个仓库于是重名成两张无意义的卡。
+    /// 这里直接按仓库名命名（`models--IDEA-Research--grounding-dino-tiny` → `IDEA-Research/grounding-dino-tiny`），
+    /// 字节按 `blobs/` 合计（snapshots 里是同一份字节的链接），**没有真权重的仓库直接跳过**
+    /// （只有 config 的占位下载不算模型，否则清单里会多出 1 KB 级的假条目）。
+    private func scanHFCache(path: String) -> [DiskUnit] {
+        let fm = FileManager.default
+        let minBytes: Int64 = 32 * 1024 * 1024          // 32 MB 以下视作元数据/占位
+        let repos = ((try? fm.contentsOfDirectory(atPath: path)) ?? [])
+            .filter { $0.hasPrefix("models--") }
+            .sorted()
+        var out: [DiskUnit] = []
+        for repo in repos where out.count < perRootLimit {
+            let repoPath = path + "/" + repo
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: repoPath, isDirectory: &isDir), isDir.boolValue else { continue }
+            var bytes: Int64 = 0
+            // ⚠️ 不能只数 `repo/blobs`：HF 有两种布局 —— 老的在仓库内 `blobs/`，
+            // 新的把真身放 `hub/blobs/<2位>/<其余>`，仓库里只有符号链接。
+            // 2026-10-31 实测：grounding-dino-base 有 1.87 GB 权重，只数 repo/blobs 得 948 K，
+            // 于是它被 32 MB 门槛挡掉、从清单里消失。改走 snapshots 解析真身、按 realpath 去重。
+            var seenReal = Set<String>()
+            var stack = [repoPath + "/snapshots"]
+            while let dir = stack.popLast() {
+                for e in ((try? fm.contentsOfDirectory(atPath: dir)) ?? []) {
+                    let p = dir + "/" + e
+                    var d: ObjCBool = false
+                    guard fm.fileExists(atPath: p, isDirectory: &d) else { continue }   // 悬空链接：没下完，跳过
+                    if d.boolValue { stack.append(p); continue }
+                    let real = (p as NSString).resolvingSymlinksInPath
+                    guard seenReal.insert(real).inserted else { continue }
+                    if let a = try? fm.attributesOfItem(atPath: real),
+                       let n = a[.size] as? NSNumber { bytes += n.int64Value }
+                }
+            }
+            guard bytes >= minBytes else { continue }
+            let name = repo.replacingOccurrences(of: "models--", with: "")
+                           .replacingOccurrences(of: "--", with: "/")
+            var id = ModelIdentity()
+            id.family = name
+            id.role = .main
+            id.format = "hf"
+            id.bytes = bytes
+            out.append(DiskUnit(path: abbreviate(repoPath),
+                                realPath: (repoPath as NSString).resolvingSymlinksInPath,
+                                source: "HF 缓存", identity: id))
+        }
+        return out
     }
 
     /// Ollama：manifests 下每层目录一个模型，manifest JSON 里带各层的字节数
@@ -237,7 +294,10 @@ final class ModelInventory {
                 guard FileManager.default.fileExists(atPath: p, isDirectory: &sub) else { continue }
                 if sub.boolValue { dirs.append(p) }
                 else if ModelIdentifier.weightExtsPublic.contains(where: { it.lowercased().hasSuffix($0) }) {
-                    total += (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? NSNumber)??.int64Value ?? 0
+                    // 符号链接（HF 快照 `snapshots/… → blobs/…`）必须算**目标文件**的字节：
+                    // attributesOfItem 对链接本身只报 90 来字节，否则整份权重会显示成「盘 —」。
+                    let real = (p as NSString).resolvingSymlinksInPath
+                    total += (try? FileManager.default.attributesOfItem(atPath: real)[.size] as? NSNumber)??.int64Value ?? 0
                 }
             }
             depth += 1

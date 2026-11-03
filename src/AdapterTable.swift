@@ -42,7 +42,7 @@ struct AdapterTable {
     /// 进程内只加载一次（三份来源叠加后的结果）
     static let shared = AdapterTable.load()
 
-    static let userPath = NSHomeDirectory() + "/Library/Application Support/Dockolate/adapters.json"
+    static let userPath = SupportDir.adaptersOverride
 
     /// 内置 + 用户 + 环境变量，依次叠加
     static func load() -> AdapterTable {
