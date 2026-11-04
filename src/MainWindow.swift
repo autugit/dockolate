@@ -1440,11 +1440,47 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             return a.title.localizedStandardCompare(b.title) == .orderedAscending
         }
         let maxSize = max(1, ordered.map { tileSize($0) }.max() ?? 1)
-        let grid = FlowGridView()
-        grid.minItemWidth = 236
-        var cards: [NSView] = []
-        var heights: [CGFloat] = []
+
+        // ---- 引擎托盘：把卡片按「能启动它的引擎」分组 ----
+        // 引擎=托盘（2026-11-04 用户裁定）。归属只认事实，不猜：
+        //   ① 配方声明的 engine  ② 运行时引擎自报  ③ 都没有 ⇒ 「未绑定引擎」托盘。
+        func trayName(_ e: CatalogEntry) -> String {
+            if let eng = e.recipe?.engine, !eng.isEmpty { return eng }
+            if !e.engineName.isEmpty { return e.engineName }
+            return "未绑定引擎"
+        }
+        var trays: [String: [CatalogEntry]] = [:]
+        var trayOrder: [String] = []
         for e in ordered {
+            let t = trayName(e)
+            if trays[t] == nil { trays[t] = []; trayOrder.append(t) }
+            trays[t]?.append(e)
+        }
+        trayOrder.sort { a, b in
+            if a == "未绑定引擎" { return false }
+            if b == "未绑定引擎" { return true }
+            let ar = trays[a]?.contains { [ModelState.running, .idle, .loading].contains($0.state) } ?? false
+            let br = trays[b]?.contains { [ModelState.running, .idle, .loading].contains($0.state) } ?? false
+            if ar != br { return ar }
+            return a.localizedStandardCompare(b) == .orderedAscending
+        }
+
+        for tray in trayOrder {
+            let group = trays[tray] ?? []
+            let resident = group.filter { [ModelState.running, .idle, .loading].contains($0.state) }
+                .reduce(0.0) { $0 + $1.memGB }
+            var head = "▸ " + tray + " · \(group.count) 个"
+            if resident > 0.05 { head += String(format: " · 常驻 %.1f GB", resident) }
+            if tray == "未绑定引擎" { head += "（没有配方，也就没有可启动它的引擎）" }
+            let trayHeader = dkLabel(head, font: DS.text(12.5, .semibold), color: DS.inkTertiary)
+            catalogList.addArrangedSubview(trayHeader)
+            trayHeader.leadingAnchor.constraint(equalTo: catalogList.leadingAnchor, constant: 4).isActive = true
+
+            let grid = FlowGridView()
+            grid.minItemWidth = 236
+            var cards: [NSView] = []
+            var heights: [CGFloat] = []
+            for e in group {
             let row = CatalogRowView(id: e.id)
             row.onLaunch = { [weak self] in
                 guard let self = self else { return }
@@ -1481,6 +1517,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         grid.setItems(cards, heights: heights)
         catalogList.addArrangedSubview(grid)
         grid.widthAnchor.constraint(equalTo: catalogList.widthAnchor).isActive = true
+        }   // ← 一个托盘结束
         catalogEmpty.isHidden = !visible.isEmpty
         let folded = entries.count - visible.count
         catalogEmpty.stringValue = visible.isEmpty
