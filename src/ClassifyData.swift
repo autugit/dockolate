@@ -53,6 +53,9 @@ struct MatchSpec {
     var path: [String] = []        // 绝对路径 通配符
     var engine: [String] = []      // 引擎族名（不是引擎自称；先用 engineFamilies 归族）
     var role: ModelRole? = nil
+    /// 排除角色：命中该角色时这条规则不成立。用途——部件规则必须写 `notRole: "main"`，
+    /// 否则像 `Qwen3.8-27B-…-MTP` 这种「主权重目录名里带 MTP」的模型会被误判成部件。
+    var notRole: ModelRole? = nil
     var port: Int? = nil
     var isMatchAll: Bool = false   // 空条件 = 匹配一切（仅在显式声明时成立）
 
@@ -63,10 +66,11 @@ struct MatchSpec {
         m.path    = (d["path"] as? String).map { [$0] } ?? (d["path"] as? [String] ?? [])
         m.engine  = (d["engine"] as? String).map { [$0] } ?? (d["engine"] as? [String] ?? [])
         if let r = d["role"] as? String, !r.isEmpty { m.role = ModelRole(rawValue: r) }
+        if let r = d["notRole"] as? String, !r.isEmpty { m.notRole = ModelRole(rawValue: r) }
         if let p = (d["port"] as? NSNumber)?.intValue { m.port = p }
         if (d["any"] as? Bool) == true { m.isMatchAll = true }
         let empty = m.name.isEmpty && m.path.isEmpty && m.engine.isEmpty
-            && m.role == nil && m.port == nil && !m.isMatchAll
+            && m.role == nil && m.notRole == nil && m.port == nil && !m.isMatchAll
         return empty ? nil : m
     }
 
@@ -86,12 +90,14 @@ struct MatchSpec {
             else { return false }
         }
         if let r = self.role, role != r { return false }
+        if let nr = self.notRole, role == nr { return false }
         if let p = self.port, port != p { return false }
         return true
     }
 
     var isEmpty: Bool {
-        name.isEmpty && path.isEmpty && engine.isEmpty && role == nil && port == nil && !isMatchAll
+        name.isEmpty && path.isEmpty && engine.isEmpty
+            && role == nil && notRole == nil && port == nil && !isMatchAll
     }
 }
 
@@ -220,8 +226,11 @@ struct ClassifyData {
 
     /// 依次按 覆盖 > 用户规则 > (内置规则) 解析。`builtinRules` 由 ModelClassifier 提供，
     /// 保证「数据里没写」时行为与旧版一致。
+    /// 依次按 覆盖 > 用户规则 > 配方声明 > 内置规则 解析。
+    /// `builtinRules` 由 ModelClassifier 提供，保证「数据里没写」时行为与旧版一致。
     func resolve(name: String, path: String, role: ModelRole, engineFamily: String?,
-                 port: Int?, builtinRules: [ClassifyRule]) -> Resolved {
+                 port: Int?, recipeCategory: ModelCategory? = nil,
+                 builtinRules: [ClassifyRule]) -> Resolved {
         var out = Resolved()
         var hits: [String] = []
 
@@ -236,18 +245,35 @@ struct ClassifyData {
             hits.append("modelOverrides[\(i)]")
         }
 
-        // ② 用户规则 → ③ 内置规则（可被 useBuiltin 关掉）
-        var pools: [(String, [ClassifyRule])] = [("classifyRules", rules)]
-        if useBuiltin { pools.append(("builtin", builtinRules)) }
-        outer: for (label, pool) in pools {
-            for (i, r) in pool.enumerated()
+        // ② 用户规则（自上而下，先命中先赢）
+        var hitUserRule = false
+        for (i, r) in rules.enumerated()
+        where r.match.matches(name: name, path: path, engineFamily: engineFamily, role: role, port: port) {
+            if out.role == nil, let rr = r.role { out.role = rr }
+            if out.category == nil, let c = r.category { out.category = c }
+            if out.label == nil, let l = r.label { out.label = l }
+            if r.hidden { out.hidden = true }
+            hits.append("classifyRules[\(i)]" + (r.label.map { "(\($0))" } ?? ""))
+            hitUserRule = true
+            break
+        }
+
+        // ③ 配方声明（用户没在规则里定，才轮到配方）
+        if !hitUserRule, out.category == nil, let c = recipeCategory {
+            out.category = c
+            hits.append("配方 category=\(c.rawValue)")
+        }
+
+        // ④ 内置默认规则（可被 defaults.useBuiltinClassify=false 整体关掉）
+        if useBuiltin, out.category == nil || out.role == nil {
+            for (i, r) in builtinRules.enumerated()
             where r.match.matches(name: name, path: path, engineFamily: engineFamily, role: role, port: port) {
                 if out.role == nil, let rr = r.role { out.role = rr }
                 if out.category == nil, let c = r.category { out.category = c }
                 if out.label == nil, let l = r.label { out.label = l }
                 if r.hidden { out.hidden = true }
-                hits.append("\(label)[\(i)]" + (r.label.map { "(\($0))" } ?? ""))
-                break outer          // 先命中先赢
+                hits.append("builtin[\(i)]" + (r.label.map { "(\($0))" } ?? ""))
+                break
             }
         }
 
@@ -289,15 +315,23 @@ struct ClassifyData {
         // 部件：先判部件，避免 LoRA/投影被当成独立模型。
         // 角色用 ModelIdentity 里已有的细分类（lora / projector / mtp / vae / textEncoder），
         // 类别统一 .part（跟随主模型），label 只用于界面说明。
-        let partHints: [(String, ModelRole)] = [
-            ("lora", .lora), ("lycoris", .lora), ("controlnet", .lora), ("ipadapter", .lora),
-            ("ip-adapter", .lora), ("mmproj", .projector), ("vision-tower", .projector),
-            ("vision_tower", .projector), ("clip_vision", .projector),
-            ("text_encoder", .textEncoder), ("vae", .vae),
-            ("draft", .mtp), ("mtp", .mtp),
+        // 部件词分两组：
+        //   · 无条件组：这些词出现在名字里就是件（loRA / ControlNet / 投影 / VAE / 文本编码器），
+        //     即使磁盘判定它是「主权重」也照样归部件 —— 否则 ControlNetModel 这种会被当成独立模型。
+        //   · 排除主权重组：`mtp` / `draft` 这类容易与主模型名冲突（`…-4bit-MTP` 是主权重包），
+        //     只在角色不是主权重时才成立。
+        let partHints: [(String, ModelRole, Bool)] = [
+            ("lora", .lora, false), ("lycoris", .lora, false),
+            ("controlnet", .lora, false), ("ipadapter", .lora, false), ("ip-adapter", .lora, false),
+            ("mmproj", .projector, false), ("vision-tower", .projector, false),
+            ("vision_tower", .projector, false), ("clip_vision", .projector, false),
+            ("text_encoder", .textEncoder, false), ("vae", .vae, false),
+            ("draft", .mtp, true), ("mtp", .mtp, true),
         ]
-        for (h, r) in partHints {
-            out.append(ClassifyRule(match: MatchSpec(name: ["*\(h)*"]), role: r, category: .part, label: h))
+        for (h, r, needsNonMain) in partHints {
+            let spec = needsNonMain ? MatchSpec(name: ["*\(h)*"], notRole: .main)
+                                    : MatchSpec(name: ["*\(h)*"])
+            out.append(ClassifyRule(match: spec, role: r, category: .part, label: h))
         }
         out += rule(["flux", "sdxl", "sd3", "stable-diffusion", "stable_diffusion", "qwen-image", "qwen_image",
                      "kolors", "playground", "juggernaut", "realvis", "pony", "checkpoint", "deepfloyd",
@@ -312,4 +346,40 @@ struct ClassifyData {
         out.append(ClassifyRule(match: MatchSpec(path: ["*/ComfyUI/*"]), category: .image))
         return out
     }()
+
+    // MARK: - 便捷入口（供 ModelCatalog / ModelClassifier / Recipe 使用）
+
+    /// 只有内置规则、不含用户数据的实例：给自检与「无配置」场景用，不读盘。
+    static let builtin = ClassifyData(engineFamilies: builtinEngineFamilies,
+                                      rules: [], overrides: [], useBuiltin: true)
+
+    /// 每次调用都从 registry.json 读盘（与 LauncherConfig 同口径：改数据即生效，无需重编译）。
+    /// 读不到或字段缺失时回落内置族表，绝不因为配置写坏而让识别层瘫掉。
+    static func loadFromRegistry() -> ClassifyData {
+        var root: [String: Any]? = nil
+        if let d = try? Data(contentsOf: URL(fileURLWithPath: SupportDir.registry)),
+           let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+            root = obj
+        }
+        return load(from: root)
+    }
+
+    /// 用**内置族表**判断两个引擎自称是否同族（供 `Recipe.matches` 使用；
+    /// 用户自定义的族表由实例方法 `sameFamily` 负责）。
+    static func sameBuiltinFamily(_ a: String?, _ b: String?) -> Bool {
+        func fam(_ s: String?) -> String? {
+            guard let e = s?.trimmingCharacters(in: .whitespaces), !e.isEmpty else { return nil }
+            let low = e.lowercased()
+            for (f, members) in builtinEngineFamilies where members.contains(where: { $0.lowercased() == low }) {
+                return f.lowercased()
+            }
+            for (f, members) in builtinEngineFamilies {
+                if low.contains(f.lowercased()) { return f.lowercased() }
+                if members.contains(where: { $0.count >= 4 && low.contains($0.lowercased()) }) { return f.lowercased() }
+            }
+            return low
+        }
+        guard let fa = fam(a), let fb = fam(b) else { return false }
+        return fa == fb
+    }
 }
