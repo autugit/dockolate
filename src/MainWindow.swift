@@ -281,6 +281,15 @@ final class CatalogRowView: NSView {
         ])
         return v
     }()
+    /// 大水印：同一枚图标放大到半透明铺在卡片底上（2026-11-04 用户要求），
+    /// 远处一眼就能认出这是推理 / 生图 / 视频 / 语音。
+    private let watermark: NSImageView = {
+        let v = NSImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.imageScaling = .scaleProportionallyUpOrDown
+        v.isEditable = false
+        return v
+    }()
     private let policyButton = NSButton(title: "策略", target: nil, action: nil)
     var onLaunch: (() -> Void)?
     var onStop: (() -> Void)?
@@ -342,6 +351,14 @@ final class CatalogRowView: NSView {
         let buttonRow = dkHStack([policyButton, dkSpacer(), launchButton, stopButton], spacing: 6)
         let content = dkVStack([titleRow, subLabel, metaRow, stateLabel], spacing: 4)
         stateLabel.isHidden = true
+        addSubview(watermark)        // 先加 = 在最底层，内容压在水印上
+        watermark.wantsLayer = true
+        NSLayoutConstraint.activate([
+            watermark.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            watermark.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 2),
+            watermark.widthAnchor.constraint(equalToConstant: 108),
+            watermark.heightAnchor.constraint(equalToConstant: 108),
+        ])
         addSubview(content)
         addSubview(buttonRow)
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -445,12 +462,21 @@ final class CatalogRowView: NSView {
         estLabel.stringValue = entry.estMemGB > 0.01 ? String(format: "≈%.1f GB", entry.estMemGB) : "—"
         estLabel.toolTip = entry.estBasis
         categoryLabel.stringValue = entry.category.icon + " " + entry.category.title
-        // 类型徽标：形状 + 配色双通道 —— 一眼分辨是推理/生图/视频/语音/嵌入/服务
-        let sym = NSImage(systemSymbolName: entry.category.symbol, accessibilityDescription: entry.category.title)
+        // 类型视觉：形状 + 配色都由数据决定（registry.json 的 categoryVisuals 可覆盖）
+        let symName = ModelVisuals.symbol(entry.category)
+        let accent = ModelVisuals.color(entry.category)
+        let sym = NSImage(systemSymbolName: symName, accessibilityDescription: entry.category.title)
         sym?.isTemplate = true
         categoryBadge.image = sym
-        categoryBadge.contentTintColor = entry.category.accent
+        categoryBadge.contentTintColor = accent
         categoryBadge.toolTip = entry.category.title
+        // 半透明大水印：同一枚图标放大铺在右上，图标色 = 类型色
+        let big = NSImage(systemSymbolName: symName, accessibilityDescription: entry.category.title)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: compact ? 64 : 96, weight: .regular))
+        big?.isTemplate = true
+        watermark.image = big
+        watermark.contentTintColor = accent
+        watermark.alphaValue = compact ? 0.10 : 0.13
         let running = [ModelState.running, .idle, .loading].contains(entry.state)
         if running {
             pill.update(entry.state.text, color: entry.state.color)
@@ -1856,4 +1882,40 @@ extension ModelCategory {
         case .other:     return .systemGray
         }
     }
+}
+
+// ============================================================
+// MARK: - 类型视觉的取值入口（数据优先，代码里的只是兜底）
+// ------------------------------------------------------------
+// registry.json 写 `categoryVisuals` 就能改图标与配色，不用重编译；
+// 5 秒缓存一次，避免每张卡片每次刷新都读盘。
+// ============================================================
+
+enum ModelVisuals {
+    private static var cache: (data: ClassifyData, at: Date)?
+
+    static func data() -> ClassifyData {
+        if let c = cache, Date().timeIntervalSince(c.at) < 5 { return c.data }
+        let d = ClassifyData.loadFromRegistry()
+        cache = (d, Date())
+        return d
+    }
+
+    static func symbol(_ c: ModelCategory) -> String {
+        data().visualSymbol(c) ?? c.symbol
+    }
+
+    static func color(_ c: ModelCategory) -> NSColor {
+        guard let name = data().visualColorName(c)?.lowercased() else { return c.accent }
+        return namedColors[name] ?? c.accent
+    }
+
+    /// 允许的颜色名（SF Symbol 之外的都回落内置配色，写错不会变成透明）
+    private static let namedColors: [String: NSColor] = [
+        "blue": .systemBlue, "red": .systemRed, "orange": .systemOrange, "yellow": .systemYellow,
+        "green": .systemGreen, "mint": .systemMint, "teal": .systemTeal, "cyan": .systemCyan,
+        "purple": .systemPurple, "pink": .systemPink, "indigo": .systemIndigo, "brown": .systemBrown,
+        "gray": .systemGray, "grey": .systemGray,
+        "label": .labelColor, "secondary": .secondaryLabelColor,
+    ]
 }
