@@ -832,6 +832,17 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     private var catalogFoot: NSTextField!
     private let catalogList = NSStackView()
     private var catalogHeader: NSTextField!
+    // 排序（用户裁定 2026-11-04）：托盘＝调用次数 / 名称；模型＝调用次数 / 名称 / 大小
+    private enum TraySort: Int { case usage, name }
+    private enum ModelSort: Int { case usage, name, size }
+    private var traySort = TraySort(rawValue: UserDefaults.standard.integer(forKey: "dk.sortTrays")) ?? .usage
+    private var modelSort = ModelSort(rawValue: UserDefaults.standard.integer(forKey: "dk.sortModels")) ?? .usage
+    private var traySortPopup: NSPopUpButton!
+    private var modelSortPopup: NSPopUpButton!
+    /// 跨重启累计的调用次数（引擎重启后计数归零，这里按增量累加，排序才不会被会话割断）
+    private var usageCounts: [String: Int] = (UserDefaults.standard.dictionary(forKey: "dk.usageCounts") as? [String: Int]) ?? [:]
+    /// 上一次看到的引擎侧请求数，用来算增量
+    private var lastSeenRequests: [String: Int] = [:]
     private let workgroupCard = CardView(title: "工作组", subtitle: "一起拉起 / 一起停")
     private var workgroupRows: [String: WorkgroupRowView] = [:]
     private var workgroupEmpty: NSTextField!
@@ -1073,6 +1084,20 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // 2) 模型管理器
         catalogHeader = dkLabel("", font: DS.captionMono, color: DS.inkSecondary, wrap: true)
         catalogCard.addRow(catalogHeader)
+        // 排序选择器：选择记进 UserDefaults，下次开机保持
+        traySortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        traySortPopup.addItems(withTitles: ["托盘：调用次数", "托盘：名称"])
+        traySortPopup.selectItem(at: min(traySort.rawValue, traySortPopup.numberOfItems - 1))
+        traySortPopup.target = self
+        traySortPopup.action = #selector(sortChanged)
+        traySortPopup.controlSize = .small
+        modelSortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        modelSortPopup.addItems(withTitles: ["模型：调用次数", "模型：名称", "模型：大小"])
+        modelSortPopup.selectItem(at: min(modelSort.rawValue, modelSortPopup.numberOfItems - 1))
+        modelSortPopup.target = self
+        modelSortPopup.action = #selector(sortChanged)
+        modelSortPopup.controlSize = .small
+        catalogCard.addRow(dkHStack([traySortPopup, modelSortPopup, dkSpacer()], spacing: 8))
         catalogEmpty = dkLabel("正在扫盘…", font: DS.caption, color: DS.inkTertiary, wrap: true)
         catalogCard.addRow(catalogEmpty)
         catalogList.orientation = .vertical
@@ -1117,6 +1142,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     }
 
     @objc private func rescanTapped() { triggerCatalog(force: true) }
+
+    /// 排序切换：记住选择，强制重建列表
+    @objc private func sortChanged() {
+        traySort = TraySort(rawValue: traySortPopup.indexOfSelectedItem) ?? .usage
+        modelSort = ModelSort(rawValue: modelSortPopup.indexOfSelectedItem) ?? .usage
+        UserDefaults.standard.set(traySort.rawValue, forKey: "dk.sortTrays")
+        UserDefaults.standard.set(modelSort.rawValue, forKey: "dk.sortModels")
+        catalogFingerprint = ""
+        rebuildCatalogRows()
+    }
 
     // ============================================================
     // MARK: 采样
@@ -1419,8 +1454,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // 需要围观时：defaults write com.autugit.dockolate dk.showParts -bool YES
         let showParts = UserDefaults.standard.bool(forKey: "dk.showParts")
         let visible = showParts ? entries : entries.filter { !$0.hidden && $0.category != .part }
-        // 指纹含状态与可见集：状态变了要重排（在跑的置顶），开关一变也要重建
-        let fingerprint = (showParts ? "P|" : "-|")
+        // 指纹含状态、可见集与排序：任一变化都要重建
+        let fingerprint = (showParts ? "P|" : "-|") + "\(traySort.rawValue)|\(modelSort.rawValue)|"
             + visible.map { $0.id + ":" + $0.state.text }.joined(separator: "|")
         guard fingerprint != catalogFingerprint else { return }
         catalogFingerprint = fingerprint
@@ -1432,12 +1467,28 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // 排序：在跑的置顶 → 分类顺序 → 名称。
         // ⛔ 不按大小降序：那样首屏全是最高的方块，一列只放得下两块（用户反馈的原状）。
         // 混排之后，矮块会把列填满，同样的可视高度能看到更多方块。
-        let ordered = visible.sorted { a, b in
-            let ar = [ModelState.running, .idle, .loading].contains(a.state)
-            let br = [ModelState.running, .idle, .loading].contains(b.state)
-            if ar != br { return ar }
-            if a.category.order != b.category.order { return a.category.order < b.category.order }
-            return a.title.localizedStandardCompare(b.title) == .orderedAscending
+        // 模型的排序（用户选项：调用次数 / 名称 / 大小）
+        func usageOf(_ e: CatalogEntry) -> Int {
+            if let n = usageCounts[e.id] { return n }
+            let key = "\(e.port ?? 0)|\(e.runtimeName.isEmpty ? e.title : e.runtimeName)"
+            return metricsByKey[key]?.requests ?? 0
+        }
+        let ordered: [CatalogEntry]
+        switch modelSort {
+        case .name:
+            ordered = visible.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .size:
+            ordered = visible.sorted {
+                let a = tileSize($0), b = tileSize($1)
+                if a != b { return a > b }
+                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+        case .usage:
+            ordered = visible.sorted {
+                let a = usageOf($0), b = usageOf($1)
+                if a != b { return a > b }
+                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
         }
         let maxSize = max(1, ordered.map { tileSize($0) }.max() ?? 1)
 
@@ -1459,10 +1510,16 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         trayOrder.sort { a, b in
             if a == "未绑定引擎" { return false }
             if b == "未绑定引擎" { return true }
-            let ar = trays[a]?.contains { [ModelState.running, .idle, .loading].contains($0.state) } ?? false
-            let br = trays[b]?.contains { [ModelState.running, .idle, .loading].contains($0.state) } ?? false
-            if ar != br { return ar }
-            return a.localizedStandardCompare(b) == .orderedAscending
+            switch traySort {
+            case .name:
+                return a.localizedStandardCompare(b) == .orderedAscending
+            case .usage:
+                // 托盘没有「大小」，用「成员调用次数之和」当热度
+                let au = (trays[a] ?? []).reduce(0) { $0 + usageOf($1) }
+                let bu = (trays[b] ?? []).reduce(0) { $0 + usageOf($1) }
+                if au != bu { return au > bu }
+                return a.localizedStandardCompare(b) == .orderedAscending
+            }
         }
 
         for tray in trayOrder {
@@ -1613,6 +1670,17 @@ final class MainWindowController: NSObject, NSWindowDelegate {
                     ? .unavailable
                     : MemoryBudget.fit(estGB: e.estMemGB, budget: budget))
             let key = "\(e.port ?? 0)|\(e.runtimeName.isEmpty ? e.title : e.runtimeName)"
+            // 累计调用次数：引擎计数可能重启归零，用「增量」累加才不会丢历史
+            if let m = metricsByKey[key] {
+                let seen = lastSeenRequests[key] ?? 0
+                if m.requests > seen {
+                    usageCounts[e.id, default: 0] += (m.requests - seen)
+                    lastSeenRequests[key] = m.requests
+                    UserDefaults.standard.set(usageCounts, forKey: "dk.usageCounts")
+                } else if m.requests < seen {
+                    lastSeenRequests[key] = m.requests      // 引擎重启，基准归零
+                }
+            }
             row.update(entry: e, fit: fit, action: actions.state(for: e.id),
                        policy: hubRegistry.entry(for: e.id, recipe: e.recipe?.id),
                        metric: metricsByKey[key],
