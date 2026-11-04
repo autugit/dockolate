@@ -1455,7 +1455,12 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         let showParts = UserDefaults.standard.bool(forKey: "dk.showParts")
         let visible = showParts ? entries : entries.filter { !$0.hidden && $0.category != .part }
         // 指纹含状态、可见集与排序：任一变化都要重建
-        let fingerprint = (showParts ? "P|" : "-|") + "\(traySort.rawValue)|\(modelSort.rawValue)|"
+        // 托盘并排的列数也进指纹——窗口一改宽度，下一次刷新就重排
+        let listWidth = catalogList.bounds.width > 40
+            ? catalogList.bounds.width
+            : max(360, (window?.contentView?.bounds.width ?? 900) - 80)
+        let columns = max(1, min(3, Int(listWidth / 470)))
+        let fingerprint = (showParts ? "P|" : "-|") + "\(traySort.rawValue)|\(modelSort.rawValue)|\(columns)|"
             + visible.map { $0.id + ":" + $0.state.text }.joined(separator: "|")
         guard fingerprint != catalogFingerprint else { return }
         catalogFingerprint = fingerprint
@@ -1522,6 +1527,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             }
         }
 
+        var trayCells: [NSView] = []
         for tray in trayOrder {
             let group = trays[tray] ?? []
             let resident = group.filter { [ModelState.running, .idle, .loading].contains($0.state) }
@@ -1530,8 +1536,6 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             if resident > 0.05 { head += String(format: " · 常驻 %.1f GB", resident) }
             if tray == "未绑定引擎" { head += "（没有配方，也就没有可启动它的引擎）" }
             let trayHeader = dkLabel(head, font: DS.text(12.5, .semibold), color: DS.inkTertiary)
-            catalogList.addArrangedSubview(trayHeader)
-            trayHeader.leadingAnchor.constraint(equalTo: catalogList.leadingAnchor, constant: 4).isActive = true
 
             let grid = FlowGridView()
             grid.minItemWidth = 236
@@ -1570,11 +1574,34 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             let h = tileHeight(size: tileSize(e), maxSize: maxSize)
             catalogTileHeights[e.id] = h
             heights.append(h)
-        }
+        }                                        // ← 一个托盘内的卡片
         grid.setItems(cards, heights: heights)
-        catalogList.addArrangedSubview(grid)
-        grid.widthAnchor.constraint(equalTo: catalogList.widthAnchor).isActive = true
-        }   // ← 一个托盘结束
+        let cell = dkVStack([trayHeader, grid], spacing: 5)
+        cell.translatesAutoresizingMaskIntoConstraints = false
+        trayCells.append(cell)
+        }                                        // ← 一个托盘结束
+
+        // ---- 托盘并排（2026-11-04 用户要求）：一行放不满就并排 2～3 个托盘 ----
+        var k = 0
+        while k < trayCells.count {
+            let slice = Array(trayCells[k ..< min(k + columns, trayCells.count)])
+            if slice.count == 1 {
+                catalogList.addArrangedSubview(slice[0])
+                slice[0].widthAnchor.constraint(equalTo: catalogList.widthAnchor).isActive = true
+            } else {
+                var padded = slice
+                while padded.count < columns { padded.append(dkSpacer()) }   // 补齐，末行不被拉满
+                let rowStack = NSStackView(views: padded)
+                rowStack.orientation = .horizontal
+                rowStack.spacing = 10
+                rowStack.distribution = .fillEqually
+                rowStack.alignment = .top
+                rowStack.translatesAutoresizingMaskIntoConstraints = false
+                catalogList.addArrangedSubview(rowStack)
+                rowStack.widthAnchor.constraint(equalTo: catalogList.widthAnchor).isActive = true
+            }
+            k += columns
+        }
         catalogEmpty.isHidden = !visible.isEmpty
         let folded = entries.count - visible.count
         catalogEmpty.stringValue = visible.isEmpty

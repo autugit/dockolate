@@ -43,7 +43,8 @@ final class MemoryReservoirView: NSView {
     private let gap: CGFloat = 3
     private let radius: CGFloat = 3
     private let legendWidth: CGFloat = 214
-    private let boxWidthWide: CGFloat = 96         // 宽版：池外小箱放池子左侧，瘦高、与池子同高
+    private let boxWidthWide: CGFloat = 64         // 宽版：池外小箱放最左侧（原 96 → 64），明显缩小
+    private let offBoxTickGap: CGFloat = 10        // 小箱与刻度列之间的缝
     private let offBoxHeightNarrow: CGFloat = 64   // 窄版：挪到池子下方，优先缩小
     private let legendBoxGap: CGFloat = 12
 
@@ -228,12 +229,15 @@ final class MemoryReservoirView: NSView {
             L.box = NSRect(x: tankX, y: L.legend.maxY + legendBoxGap, width: w, height: offBoxHeightNarrow)
         } else {
             let rx = size.width - inset - legendW
-            let boxX = tickW + inset
-            let tankX = boxX + boxWidthWide + legendBoxGap
+            // 2026-11-04 用户裁定：池外小箱挪到最左并明显缩小，刻度紧贴池子左壁——
+            // 否则刻度画在小箱右边，看着像「池外池也只有 96 GB」。
+            let boxX = inset
+            let tankX = boxX + boxWidthWide + offBoxTickGap + tickW
             let tankW = max(180, rx - 14 - tankX)
             L.tank = NSRect(x: tankX, y: inset + spillHeight, width: tankW, height: tankHeight)
-            // 池外小箱：与池子同高同底（顶部也齐），瘦高
-            L.box = NSRect(x: boxX, y: L.tank.minY, width: boxWidthWide, height: tankHeight)
+            // 瘦小箱：更窄更矮（高度 0.58×池子），底边与池底齐，绝不与池子等高
+            L.box = NSRect(x: boxX, y: L.tank.minY, width: boxWidthWide,
+                           height: max(46, tankHeight * 0.58))
             L.legend = NSRect(x: rx, y: inset, width: legendW, height: legendHeight(width: legendW))
         }
         L.inner = NSRect(x: L.tank.minX + 1.5, y: L.tank.minY + 1.5,
@@ -397,11 +401,11 @@ final class MemoryReservoirView: NSView {
         wall.lineWidth = 1.5
         wall.stroke()
 
-        // 5) 刻度（口沿＝容量）
+        // 5) 刻度（口沿＝容量）——紧贴池子左壁，与池外小箱分开
         for frac in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let v = totalGiB * frac
             let yy = L.inner.maxY - CGFloat(frac) * L.inner.height
-            drawRight(fmt(v), x: 0, y: yy - 6, width: tickW - 4,
+            drawRight(fmt(v), x: L.tank.minX - tickW, y: yy - 6, width: tickW - 4,
                       color: NSColor(calibratedWhite: 0.45, alpha: 1), size: 9, bold: frac == 1.0)
         }
 
@@ -452,11 +456,13 @@ final class MemoryReservoirView: NSView {
             return
         }
 
-        // 宽版：瘦高小箱——两行小标题 + 折行的模型名
-        drawLeft("池外", x: box.minX + 7, y: box.minY + 5,
-                 color: DS.inkSecondary, size: 9.5, bold: true, width: box.width - 14)
-        drawLeft(String(format: "未载 %.1f GB", L.offTotal), x: box.minX + 7, y: box.minY + 17,
-                 color: DS.inkTertiary, size: 8.5, bold: false, width: box.width - 14)
+        // 宽版：瘦小箱（64 pt 宽）——两行短标签，量过宽度，不会溢到刻度列
+        drawLeft("池外", x: box.minX + 4, y: box.minY + 5,
+                 color: DS.inkSecondary, size: 9.5, bold: true, width: box.width - 8)
+        drawLeft("未载", x: box.minX + 4, y: box.minY + 18,
+                 color: DS.inkTertiary, size: 8, bold: false, width: box.width - 8)
+        drawLeft(String(format: "%.0fGB", L.offTotal), x: box.minX + 4, y: box.minY + 28,
+                 color: DS.inkTertiary, size: 8, bold: false, width: box.width - 8)
         if L.offBlocks.isEmpty {
             drawLeft("全部驻留", x: box.minX + 7, y: box.midY,
                      color: DS.inkTertiary, size: 8.5, bold: false, width: box.width - 14)
