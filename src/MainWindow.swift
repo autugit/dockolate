@@ -268,6 +268,19 @@ final class CatalogRowView: NSView {
     private let stateLabel = dkLabel("", font: DS.caption, color: DS.inkTertiary)
     /// 分类小标签：网格不再按分类分段，分类信息落进方块里
     private let categoryLabel = dkLabel("", font: DS.captionMono, color: DS.inkTertiary)
+    /// 类型徽标：SF Symbol + 分类配色，一眼区分 推理 / 生图 / 视频 / 语音 / 嵌入 / 服务
+    private let categoryBadge: NSImageView = {
+        let v = NSImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.imageScaling = .scaleProportionallyDown
+        v.setContentHuggingPriority(.required, for: .horizontal)
+        v.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            v.widthAnchor.constraint(equalToConstant: 15),
+            v.heightAnchor.constraint(equalToConstant: 15),
+        ])
+        return v
+    }()
     private let policyButton = NSButton(title: "策略", target: nil, action: nil)
     var onLaunch: (() -> Void)?
     var onStop: (() -> Void)?
@@ -324,7 +337,7 @@ final class CatalogRowView: NSView {
         sizeLabel.alignment = .left
         estLabel.alignment = .left
 
-        let titleRow = dkHStack([dot, titleLabel, dkSpacer(), pill], spacing: 6)
+        let titleRow = dkHStack([categoryBadge, dot, titleLabel, dkSpacer(), pill], spacing: 6)
         let metaRow = dkHStack([categoryLabel, sizeLabel, estLabel, dkSpacer()], spacing: 8)
         let buttonRow = dkHStack([policyButton, dkSpacer(), launchButton, stopButton], spacing: 6)
         let content = dkVStack([titleRow, subLabel, metaRow, stateLabel], spacing: 4)
@@ -432,6 +445,12 @@ final class CatalogRowView: NSView {
         estLabel.stringValue = entry.estMemGB > 0.01 ? String(format: "≈%.1f GB", entry.estMemGB) : "—"
         estLabel.toolTip = entry.estBasis
         categoryLabel.stringValue = entry.category.icon + " " + entry.category.title
+        // 类型徽标：形状 + 配色双通道 —— 一眼分辨是推理/生图/视频/语音/嵌入/服务
+        let sym = NSImage(systemSymbolName: entry.category.symbol, accessibilityDescription: entry.category.title)
+        sym?.isTemplate = true
+        categoryBadge.image = sym
+        categoryBadge.contentTintColor = entry.category.accent
+        categoryBadge.toolTip = entry.category.title
         let running = [ModelState.running, .idle, .loading].contains(entry.state)
         if running {
             pill.update(entry.state.text, color: entry.state.color)
@@ -1369,8 +1388,14 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     // ============================================================
 
     private func rebuildCatalogRows() {
-        // 指纹含状态：状态变了也要重排（在跑的置顶），但只重排不重建视图
-        let fingerprint = entries.map { $0.id + ":" + $0.state.text }.joined(separator: "|")
+        // 部件（LoRA / 视觉投影 / VAE / 文本编码器…）默认不进列表：
+        // 它们不是能启动的模型，混在卡片里只会淹没真正的条目（2026-11-04 用户裁定）。
+        // 需要围观时：defaults write com.autugit.dockolate dk.showParts -bool YES
+        let showParts = UserDefaults.standard.bool(forKey: "dk.showParts")
+        let visible = showParts ? entries : entries.filter { !$0.hidden && $0.category != .part }
+        // 指纹含状态与可见集：状态变了要重排（在跑的置顶），开关一变也要重建
+        let fingerprint = (showParts ? "P|" : "-|")
+            + visible.map { $0.id + ":" + $0.state.text }.joined(separator: "|")
         guard fingerprint != catalogFingerprint else { return }
         catalogFingerprint = fingerprint
 
@@ -1381,7 +1406,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         // 排序：在跑的置顶 → 分类顺序 → 名称。
         // ⛔ 不按大小降序：那样首屏全是最高的方块，一列只放得下两块（用户反馈的原状）。
         // 混排之后，矮块会把列填满，同样的可视高度能看到更多方块。
-        let ordered = entries.sorted { a, b in
+        let ordered = visible.sorted { a, b in
             let ar = [ModelState.running, .idle, .loading].contains(a.state)
             let br = [ModelState.running, .idle, .loading].contains(b.state)
             if ar != br { return ar }
@@ -1430,8 +1455,14 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         grid.setItems(cards, heights: heights)
         catalogList.addArrangedSubview(grid)
         grid.widthAnchor.constraint(equalTo: catalogList.widthAnchor).isActive = true
-        catalogEmpty.isHidden = !entries.isEmpty
-        catalogEmpty.stringValue = entries.isEmpty ? "没扫到任何模型。检查扫描目录，或在 registry.json 的 recipes 里加配方。" : ""
+        catalogEmpty.isHidden = !visible.isEmpty
+        let folded = entries.count - visible.count
+        catalogEmpty.stringValue = visible.isEmpty
+            ? "没扫到任何模型。检查扫描目录，或在 registry.json 的 recipes 里加配方。"
+            : ""
+        if folded > 0, catalogHeader.stringValue.contains("折叠") == false {
+            catalogHeader.stringValue += "　·　已折叠 \(folded) 个部件"
+        }
     }
 
     /// 方块大小口径 = 估算内存（权重 + 开销）；拿不到就退回盘占
@@ -1788,5 +1819,41 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         }
         guard let png = rep.representation(using: .png, properties: [:]) else { return false }
         do { try png.write(to: URL(fileURLWithPath: path)); return true } catch { return false }
+    }
+}
+
+// ============================================================
+// MARK: - 分类的视觉语言（形状 + 配色，一眼可辨）
+// ------------------------------------------------------------
+// 用户裁定（2026-11-04）：不同类型的模型必须一眼能分野，不能只靠一行小字。
+// 两个通道同时给：SF Symbol 的形状不同（文字气泡 / 相片 / 胶片 / 声波 / 网格 / 齿轮），
+// 配色也不同（蓝 / 紫 / 橙 / 青 / 靛 / 灰）。
+// ============================================================
+
+extension ModelCategory {
+    var symbol: String {
+        switch self {
+        case .chat:      return "text.bubble"
+        case .image:     return "photo"
+        case .video:     return "film"
+        case .audio:     return "waveform"
+        case .embedding: return "square.grid.3x3"
+        case .service:   return "gearshape"
+        case .part:      return "puzzlepiece"
+        case .other:     return "questionmark.circle"
+        }
+    }
+
+    var accent: NSColor {
+        switch self {
+        case .chat:      return .systemBlue
+        case .image:     return .systemPurple
+        case .video:     return .systemOrange
+        case .audio:     return .systemTeal
+        case .embedding: return .systemIndigo
+        case .service:   return .systemGray
+        case .part:      return .tertiaryLabelColor
+        case .other:     return .systemGray
+        }
     }
 }
