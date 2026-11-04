@@ -94,7 +94,7 @@ final class SelfTest {
         print("== Splash 日志解析 ==")
         let splash = SplashLogProfile()
         splash.reset()
-        splash.consume("Ready · model · context 256K · http://127.0.0.1:8000")
+        splash.consume("Ready · model · context 256K · http://127.0.0.1:18080")
         splash.consume("Done · input 4,184 · cached 0 · output 900 · TTFT 3.5s · 74.0 tok/s · 2.1 tok/cycle")
         splash.consume("Done · input 805 · cached 672 · output 71 · TTFT 0.2s · 48.4 tok/s · 4.1 tok/cycle")
         splash.consume("Error · not_found · GET /api/ps")

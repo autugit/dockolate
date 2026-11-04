@@ -67,8 +67,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>       <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key>           <string>1.7.0</string>
-    <key>CFBundleShortVersionString</key><string>1.7.0</string>
+    <key>CFBundleVersion</key>           <string>1.8.0</string>
+    <key>CFBundleShortVersionString</key><string>1.8.0</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>Dockolate</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
@@ -94,8 +94,8 @@ cat > "$HUB_APP/Contents/Info.plist" <<HUBPLIST
     <key>CFBundleDisplayName</key>       <string>Dockolate Hub</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID.hub</string>
-    <key>CFBundleVersion</key>           <string>1.7.0</string>
-    <key>CFBundleShortVersionString</key><string>1.7.0</string>
+    <key>CFBundleVersion</key>           <string>1.8.0</string>
+    <key>CFBundleShortVersionString</key><string>1.8.0</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>LSUIElement</key>               <true/>
