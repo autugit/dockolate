@@ -1456,10 +1456,12 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         let visible = showParts ? entries : entries.filter { !$0.hidden && $0.category != .part }
         // 指纹含状态、可见集与排序：任一变化都要重建
         // 托盘并排的列数也进指纹——窗口一改宽度，下一次刷新就重排
-        let listWidth = catalogList.bounds.width > 40
-            ? catalogList.bounds.width
-            : max(360, (window?.contentView?.bounds.width ?? 900) - 80)
-        let columns = max(1, min(3, Int(listWidth / 470)))
+        // 用「窗内可用宽度」而不是 catalogList 的实测宽度：首次 build 时实测值可能还是 0，
+        // 会退化成一列（2026-11-04 实测窗口 796 宽时按 470 阈值只排出 1 列，用户看到"没有并排"）。
+        let windowWidth = window?.contentView?.bounds.width ?? 900
+        let listWidth = max(catalogList.bounds.width, windowWidth - 80)
+        // 每个托盘至少 330 pt 才看得清卡片
+        let columns = max(1, min(3, Int((listWidth + 10) / 340)))
         let fingerprint = (showParts ? "P|" : "-|") + "\(traySort.rawValue)|\(modelSort.rawValue)|\(columns)|"
             + visible.map { $0.id + ":" + $0.state.text }.joined(separator: "|")
         guard fingerprint != catalogFingerprint else { return }
@@ -1603,6 +1605,11 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             k += columns
         }
         catalogEmpty.isHidden = !visible.isEmpty
+        // 排布自检：只有带 DOCKOLATE_DEBUG_LAYOUT=1 启动时才写，供自动化验收读
+        if ProcessInfo.processInfo.environment["DOCKOLATE_DEBUG_LAYOUT"] == "1" {
+            let summary = "columns=\(columns) listWidth=\(Int(listWidth)) trays=[\(trayOrder.joined(separator: ", "))]\n"
+            try? summary.write(toFile: "/tmp/dockolate-layout.txt", atomically: true, encoding: .utf8)
+        }
         let folded = entries.count - visible.count
         catalogEmpty.stringValue = visible.isEmpty
             ? "没扫到任何模型。检查扫描目录，或在 registry.json 的 recipes 里加配方。"
