@@ -155,6 +155,12 @@ struct ClassifyData {
     var overrides: [ModelOverride] = []
     /// 是否在用户规则之后继续用内置默认规则
     var useBuiltin: Bool = true
+    /// 类型 → 视觉（图标形状 / 颜色），可被 registry.json 的 `categoryVisuals` 覆盖，
+    /// 这样连「图标长什么样」都不用重编译。
+    var visuals: [ModelCategory: (symbol: String?, color: String?)] = [:]
+
+    func visualSymbol(_ c: ModelCategory) -> String? { visuals[c]?.symbol }
+    func visualColorName(_ c: ModelCategory) -> String? { visuals[c]?.color }
 
     // MARK: 解析
 
@@ -182,6 +188,14 @@ struct ClassifyData {
         if let defs = root["defaults"] as? [String: Any],
            let b = defs["useBuiltinClassify"] as? Bool {
             d.useBuiltin = b
+        }
+        // 类型视觉覆盖：categoryVisuals: [{category, symbol, color}]
+        if let arr = root["categoryVisuals"] as? [[String: Any]] {
+            for o in arr {
+                guard let c = (o["category"] as? String).flatMap({ ModelCategory(rawValue: $0.lowercased()) })
+                else { continue }
+                d.visuals[c] = (o["symbol"] as? String, o["color"] as? String)
+            }
         }
         return d
     }
