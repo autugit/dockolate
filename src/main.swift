@@ -978,7 +978,8 @@ if CommandLine.arguments.contains("--mgmt-list")
         print("状态      : \(e.state.text)"
               + (e.port.map { " · 端口 \($0)" } ?? "")
               + (e.pid.map { " · pid \($0)" } ?? ""))
-        print("折叠      : \(e.hidden ? "是（--mgmt-list 默认隐藏，--all 可见）" : "否")")
+        print("折叠      : \(e.hidden ? "是（默认隐藏，--all 可见）" : "否")")
+        print("归属引擎  : \(e.recipe?.engine ?? e.classifyEngine ?? "（按运行时自报，否则进「未绑定引擎」托盘）")")
         if let rt = e.recipe {
             print("配方      : \(rt.id) · engine=\(rt.engine ?? "-") · port=\(rt.port.map(String.init) ?? "-") · media=\(rt.media ?? "-")")
         }
