@@ -130,6 +130,9 @@ struct ModelOverride {
     var category: ModelCategory? = nil
     var media: String? = nil       // "mlxserve" / "llama.cpp" / "comfyui" …
     var hidden: Bool = false
+    /// 归属引擎（托盘归属）：像 ComfyUI 这种「引擎本身没有配方路径」的情况，
+    /// 用它把磁盘上的模型挂到某个引擎托盘下，不必为每个模型都写一条启动配方。
+    var assignedEngine: String? = nil
 
     static func parse(_ obj: [String: Any]) -> ModelOverride? {
         guard let m = MatchSpec.parse(obj["match"]) else { return nil }
@@ -138,6 +141,7 @@ struct ModelOverride {
         o.aliases = (obj["aliases"] as? [String]) ?? []
         if let s = obj["category"] as? String, !s.isEmpty { o.category = ModelCategory(rawValue: s.lowercased()) }
         if let s = obj["media"] as? String, !s.isEmpty { o.media = s }
+        if let s = obj["assignedEngine"] as? String, !s.isEmpty { o.assignedEngine = s }
         if let b = obj["hidden"] as? Bool { o.hidden = b }
         return o
     }
@@ -234,6 +238,8 @@ struct ClassifyData {
         var media: String?
         var hidden: Bool = false
         var label: String?
+        /// 归属引擎（托盘归属），优先于运行时自报的引擎名
+        var assignedEngine: String?
         /// 命中的规则来源，供 `--explain` 打印
         var evidence: String = ""
     }
@@ -255,6 +261,7 @@ struct ClassifyData {
             out.aliases.append(contentsOf: o.aliases)
             if out.category == nil, let c = o.category { out.category = c }
             if out.media == nil, let m = o.media { out.media = m }
+            if out.assignedEngine == nil, let g = o.assignedEngine { out.assignedEngine = g }
             if o.hidden { out.hidden = true }
             hits.append("modelOverrides[\(i)]")
         }

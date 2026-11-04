@@ -4,6 +4,17 @@ All notable changes to Dockolate are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/).
 
+## [1.8.1] — 2026-11-04
+
+### Fixed — 引擎归属：ComfyUI 是引擎，不是模型
+
+- **引擎可以「认领」模型**：`modelOverrides` 新增 `assignedEngine`，把磁盘上的模型挂到某个引擎托盘下，
+  不必为每个模型都写一条启动配方。归属优先级：配方声明的 `engine` → `assignedEngine` → 运行时自报 →
+  「未绑定引擎」托盘。
+- ComfyUI 的配方改为声明 `engine: "ComfyUI"`，因此它自己形成一个引擎托盘；Qwen-Image 2.1 / Edit 系列的
+  权重通过 `assignedEngine: "ComfyUI"` 落在同一个托盘里，不再孤零零地待在「未绑定引擎」。
+- `--explain` 增加「归属引擎」一行，托盘归属可直接查。
+
 ## [1.8.0] — 2026-11-04
 
 ### Added — 模型识别层完全数据驱动 + 引擎托盘 + 可排序
