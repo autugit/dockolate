@@ -944,7 +944,8 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--release=") }) {
 }
 
 if CommandLine.arguments.contains("--mgmt-list")
-    || CommandLine.arguments.contains(where: { $0.hasPrefix("--mgmt-action=") }) {
+    || CommandLine.arguments.contains(where: { $0.hasPrefix("--mgmt-action=") })
+    || CommandLine.arguments.contains(where: { $0.hasPrefix("--explain=") }) {
     _ = NSApplication.shared
     let cfg = LauncherConfig.load()
     let watcher = EngineWatcher()
@@ -960,6 +961,33 @@ if CommandLine.arguments.contains("--mgmt-list")
         + invCfg.extraDirs + runtime.modelDirs
     let entries = ModelCatalog.build(units: units, runtime: runtime, config: cfg,
                                      observed: ObservedMemory(), roots: roots)
+
+    if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--explain=") }) {
+        let target = a.replacingOccurrences(of: "--explain=", with: "")
+        let r = resolveMgmtTarget(target, entries: entries, config: cfg)
+        guard let e = r.0 else {
+            print("找不到条目：\(target)" + (r.1.isEmpty ? "" : " —— \(r.1)")); exit(2)
+        }
+        let data = ClassifyData.loadFromRegistry()
+        print("条目      : \(e.id)")
+        print("显示名    : \(e.title)")
+        print("类别      : \(e.category.rawValue)（\(e.category.title)）")
+        print("部件      : \(e.parts.isEmpty ? "无（本条目自身就是主权重）" : e.parts.joined(separator: "、"))")
+        print("判定依据  : \(e.classifyEvidence.isEmpty ? "（未记录）" : e.classifyEvidence)")
+        print(String(format: "盘上/估算 : %.1f GB / %.1f GB（%@）", e.diskGB, e.estMemGB, e.estBasis))
+        print("状态      : \(e.state.text)"
+              + (e.port.map { " · 端口 \($0)" } ?? "")
+              + (e.pid.map { " · pid \($0)" } ?? ""))
+        print("折叠      : \(e.hidden ? "是（--mgmt-list 默认隐藏，--all 可见）" : "否")")
+        if let rt = e.recipe {
+            print("配方      : \(rt.id) · engine=\(rt.engine ?? "-") · port=\(rt.port.map(String.init) ?? "-") · media=\(rt.media ?? "-")")
+        }
+        print("规则来源  : registry.json 里 engineFamilies \(data.engineFamilies.count) 族"
+              + " · classifyRules \(data.rules.count) 条"
+              + " · modelOverrides \(data.overrides.count) 条"
+              + " · 内置默认=\(data.useBuiltin)")
+        exit(0)
+    }
 
     if CommandLine.arguments.contains("--mgmt-list") {
         let reg = HubRegistry.load()
@@ -978,13 +1006,33 @@ if CommandLine.arguments.contains("--mgmt-list")
                      b.totalGB, b.wiredGB, b.compressedGB, residentSum, b.reserveGB,
                      b.availableGB, max(0, b.totalGB - b.usedGB - b.reserveGB)))
         let ms = MetricsStore()
-        for e in entries {
-            print(String(format: "  %-46s %-8s %-34s %6.1f GB 盘%6.1f %@ %@",
-                         (e.id as NSString).utf8String!,
-                         (e.category.title as NSString).utf8String!,
-                         (String(e.title.prefix(32)) as NSString).utf8String!,
-                         e.estMemGB, e.diskGB, e.state.text,
-                         e.canLaunch ? "可拉起" : (e.blockedReason ?? "")))
+        // 中文路径按「字节」补宽会把后面的列全部挤乱（实测 id 被截断、看着像模型不在列表里）。
+        // 这里改成按显示宽度补齐：CJK / 全角字符算 2 列。
+        func dispWidth(_ s: String) -> Int {
+            s.reduce(0) { acc, ch in
+                let v = ch.unicodeScalars.first?.value ?? 0
+                let wide = (0x1100...0x115F).contains(v) || (0x2E80...0xA4CF).contains(v)
+                    || (0xAC00...0xD7A3).contains(v) || (0xF900...0xFAFF).contains(v)
+                    || (0xFE30...0xFE4F).contains(v) || (0xFF00...0xFF60).contains(v)
+                    || (0xFFE0...0xFFE6).contains(v) || v > 0x1F000
+                return acc + (wide ? 2 : 1)
+            }
+        }
+        func pad(_ s: String, _ w: Int) -> String {
+            let n = dispWidth(s)
+            return n >= w ? s : s + String(repeating: " ", count: w - n)
+        }
+        let showAll = CommandLine.arguments.contains("--all")
+        let hiddenCount = entries.filter { $0.hidden }.count
+        if hiddenCount > 0 && !showAll {
+            print("（另有 \(hiddenCount) 条部件 / LoRA / 视觉投影按规则折叠，加 --all 显示）")
+        }
+        for e in entries where showAll || !e.hidden {
+            var line = "  " + pad(e.id, 46) + " " + pad(e.category.title, 10) + " "
+                + pad(String(e.title.prefix(30)), 32)
+            line += String(format: " %6.1f GB 盘%6.1f  ", e.estMemGB, e.diskGB)
+            line += e.state.text + " " + (e.canLaunch ? "可拉起" : (e.blockedReason ?? ""))
+            print(line)
             if let pol = reg.entry(for: e.id, recipe: e.recipe?.id) {
                 print("      ↳ 策略 \(pol.id) · 驻留=\(pol.resident) 自启=\(pol.autoStart) 重拉=\(pol.restartOnCrash) 互斥=\(pol.mutexWith) 对外=\(pol.exposed)")
             }
@@ -1007,8 +1055,13 @@ if CommandLine.arguments.contains("--mgmt-list")
     guard let a = CommandLine.arguments.first(where: { $0.hasPrefix("--mgmt-action=") }) else { exit(2) }
     let spec = a.replacingOccurrences(of: "--mgmt-action=", with: "")
     let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
-    guard parts.count == 2, let entry = entries.first(where: { $0.id == parts[1] }) else {
-        print("找不到条目：\(spec)")
+    guard parts.count == 2 else {
+        print("用法：--mgmt-action=launch|stop:<目标>；目标可以是 条目id / recipe:<配方id> / engine:<引擎名> / 裸名字")
+        exit(2)
+    }
+    let resolved = resolveMgmtTarget(parts[1], entries: entries, config: cfg)
+    guard let entry = resolved.0 else {
+        print("找不到条目：\(spec)" + (resolved.1.isEmpty ? "" : " —— \(resolved.1)"))
         exit(2)
     }
     let runner = ModelActionRunner()

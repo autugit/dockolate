@@ -34,6 +34,60 @@ func realPathEqual(_ a: String, _ b: String) -> Bool {
     (a as NSString).resolvingSymlinksInPath == (b as NSString).resolvingSymlinksInPath
 }
 
+/// 把「管理入口目标」解析成条目。支持（按强度）：
+///   条目 id 全等 → `recipe:<配方id>`（配方与磁盘条目合并成一张卡时解析到宿主条目）
+///   → `engine:<引擎名/族名>` → 裸名字（显示名 / 目录名归一化全等）
+/// 歧义一律返回错误 + 候选，**不猜**（用户对「按名字猜」零容忍）。
+func resolveMgmtTarget(_ target: String, entries: [CatalogEntry],
+                       config: LauncherConfig) -> (CatalogEntry?, String) {
+    let t = target.trimmingCharacters(in: .whitespaces)
+    if t.isEmpty { return (nil, "目标为空") }
+    if let e = entries.first(where: { $0.id == t }) { return (e, "") }
+    let low = t.lowercased()
+
+    if low.hasPrefix("recipe:") {
+        let rid = String(t.dropFirst("recipe:".count))
+        if let e = entries.first(where: { $0.recipe?.id == rid }) { return (e, "") }
+        if let r = config.recipes.first(where: { $0.id == rid }), let rp = r.path,
+           let e = entries.first(where: { e in
+               guard let dp = e.diskPath else { return false }
+               return realPathEqual(rp, dp)
+           }) {
+            return (e, "")
+        }
+        return (nil, "没有这个配方：\(rid)")
+    }
+
+    if low.hasPrefix("engine:") {
+        let en = String(t.dropFirst("engine:".count))
+        let hits = entries.filter { e in
+            let eng = e.engineName.isEmpty ? (e.recipe?.engine ?? "") : e.engineName
+            return !eng.isEmpty && ClassifyData.sameBuiltinFamily(eng, en)
+        }
+        if hits.count == 1 { return (hits[0], "") }
+        if hits.isEmpty { return (nil, "没有引擎「\(en)」的条目") }
+        return (nil, "引擎「\(en)」对应多个条目，请指定 id：" + hits.map { $0.id }.joined(separator: "、"))
+    }
+
+    let key = normName(t)
+    // 别名也算身份：用户在 modelOverrides 里写的 aliases 应能直接用来指定条目
+    let data = ClassifyData.loadFromRegistry()
+    func aliases(of e: CatalogEntry) -> [String] {
+        data.overrides
+            .filter { $0.match.matches(name: e.title, path: e.diskPath ?? "",
+                                       engineFamily: nil, role: .main, port: e.port) }
+            .flatMap { $0.aliases }
+    }
+    let hits = entries.filter { e in
+        normName(e.title) == key
+            || normName((((e.diskPath ?? "") as NSString).lastPathComponent)) == key
+            || aliases(of: e).contains { normName($0) == key }
+    }
+    if hits.count == 1 { return (hits[0], "") }
+    if hits.isEmpty { return (nil, "没有匹配「\(t)」的条目") }
+    return (nil, "「\(t)」匹配多个条目，请指定 id：" + hits.map { $0.title }.joined(separator: "、"))
+}
+
 // ============================================================
 // MARK: - 启动配方
 // ============================================================
@@ -119,9 +173,14 @@ struct LaunchRecipe {
             if hay.contains(normName(p)) { return true }
         }
         if let e = self.engine, let en = engine, !en.isEmpty,
-           en.localizedCaseInsensitiveContains(e) || e.localizedCaseInsensitiveContains(en) {
+           ClassifyData.sameBuiltinFamily(e, en) {
+            // 引擎同族时，端口是唯一硬证据。
             if let rp = self.port, let pp = port { return rp == pp }
-            if self.port == nil { return true }
+            // ⛔ 2026-11-04：引擎同族但配方未声明端口，不再直接认定是它 ——
+            //    原来这条（`self.port == nil { return true }`）让 `engine:"mlx-serve"` 的 H3 配方
+            //    认领了 `engine:"MLX"`（mlx_vlm）的运行行，把别的引擎的状态/内存贴到这张卡上。
+            //    设计见 docs/设计-模型识别层数据驱动_*.md §四。
+            return false
         }
         // 既没声明引擎、也没给权重模式的配方（ComfyUI 这类「服务」配方）：
         // 端口就是它唯一的身份——监听在这个端口上的进程就是它。
@@ -349,27 +408,30 @@ enum ModelCategory: String, CaseIterable {
 }
 
 enum ModelClassifier {
-    private static let imageHints = ["flux", "sdxl", "sd3", "stable-diffusion", "stable_diffusion", "qwen-image",
-                                     "qwen_image", "kolors", "playground", "juggernaut", "realvis", "pony",
-                                     "checkpoint", "deepfloyd", "pixart", "hidream", "chroma", "instantid",
-                                     "controlnet", "ipadapter", "deep plug", "deepplug"]
-    private static let videoHints = ["wan2", "wan-2", "hunyuanvideo", "hunyuan-video", "ltx", "cogvideo",
-                                     "minimax-h3", "minimax_h3", "i2v", "t2v", "svd", "svd-xt", "seedance", "kling"]
-    private static let audioHints = ["whisper", "kokoro", "piper", "coqui", "chattts", "xtts", "tts", "bark",
-                                     "musicgen", "stable-audio"]
-    private static let embedHints = ["embed", "rerank", "bge", "gte", "minilm", "e5-", "e5_", "sentence-transformers",
-                                     "clip-vit", "colbert"]
-
+    /// 旧签名（自检、未接线调用方）：只用内置规则，不读盘 —— 行为与改造前等价。
     static func classify(name: String, path: String, role: ModelRole, categoryHint: String?) -> ModelCategory {
-        if let hint = categoryHint, let c = ModelCategory(rawValue: hint.lowercased()) { return c }
-        let hay = (name + " " + path).lowercased()
-        if role != .main { return .part }
-        if imageHints.contains(where: { hay.contains($0) }) { return .image }
-        if videoHints.contains(where: { hay.contains($0) }) { return .video }
-        if audioHints.contains(where: { hay.contains($0) }) { return .audio }
-        if embedHints.contains(where: { hay.contains($0) }) { return .embedding }
-        if path.contains("/ComfyUI/") { return .image }
-        return .chat
+        classify(name: name, path: path, role: role, categoryHint: categoryHint,
+                 data: .builtin, engineFamily: nil, port: nil)
+    }
+
+    /// 新签名：`data` 来自 registry.json（engineFamilies / classifyRules / modelOverrides），
+    /// 用户改数据即生效，不必重编译。见 docs/设计-模型识别层数据驱动_*.md。
+    static func classify(name: String, path: String, role: ModelRole, categoryHint: String?,
+                         data: ClassifyData, engineFamily: String? = nil, port: Int? = nil) -> ModelCategory {
+        resolve(name: name, path: path, role: role, categoryHint: categoryHint,
+                data: data, engineFamily: engineFamily, port: port).category ?? .chat
+    }
+
+    /// 解析完整身份：类别 / 角色 / 显示名 / 别名 / 媒体口径 / 是否隐藏 / 命中证据。
+    static func resolve(name: String, path: String, role: ModelRole, categoryHint: String?,
+                        data: ClassifyData, engineFamily: String? = nil, port: Int? = nil) -> ClassifyData.Resolved {
+        let hint = categoryHint.flatMap { ModelCategory(rawValue: $0.lowercased()) }
+        var r = data.resolve(name: name, path: path, role: role, engineFamily: engineFamily,
+                             port: port, recipeCategory: hint, builtinRules: ClassifyData.builtinRules)
+        // 非主权重一定不是独立模型：没被显式归类就落到「部件」
+        if role != .main, r.category == nil { r.category = .part }
+        if r.category == nil { r.category = .chat }
+        return r
     }
 }
 
@@ -481,6 +543,10 @@ struct CatalogEntry {
     var blockedReason: String? = nil
     var parts: [String] = []
     var diskPath: String? = nil
+    /// 用户规则要求隐藏（折叠）时不进主列表；仍保留在清单里，可用「显示全部」看到
+    var hidden: Bool = false
+    /// 命中的规则来源（`--explain` 打印，便于用户调规则）
+    var classifyEvidence: String = ""
 }
 
 enum ModelCatalog {
@@ -490,6 +556,8 @@ enum ModelCatalog {
         let rootSet = Set(roots.map { ($0 as NSString).resolvingSymlinksInPath })
         var entries: [CatalogEntry] = []
         var usedUnitIdx = Set<Int>()
+        // 识别规则：每次 build 都从 registry.json 读盘（改数据即生效，无需重编译）
+        let classifyData = ClassifyData.loadFromRegistry()
 
         // ---- 1) 把磁盘单元按「主模型目录」归组：部件（vae / text_encoder / 草稿头）跟着主模型算一家
         struct Group { var main: DiskUnit?; var parts: [DiskUnit] }
@@ -537,16 +605,19 @@ enum ModelCatalog {
             if g.main == nil, let first = g.parts.first, g.parts.count > 1 {
                 name = first.identity.family ?? first.identity.displayName
             }
-            let category = ModelClassifier.classify(name: name, path: k,
-                                                    role: g.main?.identity.role ?? p.identity.role,
-                                                    categoryHint: nil)
+            let diskRole = g.main?.identity.role ?? p.identity.role
+            let res = ModelClassifier.resolve(name: name, path: k, role: diskRole,
+                                              categoryHint: nil, data: classifyData)
+            let category = res.category ?? .chat
             let observedGB = observed.value(for: k)
             let est = MemoryEstimator.estimate(weightsGB: weightsGB, category: category, observedGB: observedGB)
-            var entry = CatalogEntry(id: "disk:" + k, title: name,
+            var entry = CatalogEntry(id: "disk:" + k, title: res.title ?? name,
                                      subtitle: p.source + " · " + abbreviate(k),
                                      category: category,
                                      diskGB: weightsGB, estMemGB: est.gb, estBasis: est.basis,
                                      diskPath: k)
+            entry.hidden = res.hidden
+            entry.classifyEvidence = res.evidence
             entry.parts = g.parts.map { $0.identity.displayName + "（" + $0.identity.role.rawValue + "）" }
             entries.append(entry)
             for (i, u) in units.enumerated() where u.realPath == g.main?.realPath || g.parts.contains(where: { $0.realPath == u.realPath }) {
@@ -557,7 +628,7 @@ enum ModelCatalog {
         // ---- 3) 盘上没有、但配方声明了的模型（引擎从别处加载 / 用户手写配方）
         for r in config.recipes where r.kind != "service" {
             let already = entries.contains { e in
-                if let rp = r.path, let dp = e.diskPath, rp == dp { return true }
+                if let rp = r.path, let dp = e.diskPath, realPathEqual(rp, dp) { return true }
                 let hay = (e.title + " " + (e.diskPath ?? "")).lowercased()
                 return r.modelPatterns.contains { !$0.isEmpty && hay.contains($0.lowercased()) }
             }
@@ -576,7 +647,8 @@ enum ModelCatalog {
             }
             let title = r.title ?? (r.path.map { ($0 as NSString).lastPathComponent } ?? r.id)
             let category = ModelClassifier.classify(name: title, path: r.path ?? "",
-                                                    role: .main, categoryHint: r.category)
+                                                    role: .main, categoryHint: r.category,
+                                                    data: classifyData, engineFamily: r.engine, port: r.port)
             let observedGB = observed.value(for: r.path ?? r.id)
             let est = r.estMemGB.map { ($0, "配方声明") }
                 ?? MemoryEstimator.estimate(weightsGB: weightsGB, category: category, observedGB: observedGB)
@@ -653,7 +725,9 @@ enum ModelCatalog {
         for row in runtime.rows {
             let already = entries.contains { $0.runtimeName == row.name && $0.port == row.port }
             guard !already else { continue }
-            let cat = ModelClassifier.classify(name: row.name, path: row.note, role: .main, categoryHint: nil)
+            let cat = ModelClassifier.classify(name: row.name, path: row.note, role: .main,
+                                               categoryHint: nil, data: classifyData,
+                                               engineFamily: row.engine, port: row.port)
             var e = CatalogEntry(id: "runtime:\(row.port ?? 0):\(row.name)", title: row.name,
                                  subtitle: "运行时 · " + (row.note.split(separator: "·").first.map(String.init) ?? "引擎自报"),
                                  category: cat, estMemGB: row.memGB, estBasis: "当前实测")
