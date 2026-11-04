@@ -2,3 +2,6 @@ build/
 .DS_Store
 *.log
 tests/last_report.json
+
+# 发布产物（不入库）
+*.app.zip
