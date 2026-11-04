@@ -1504,6 +1504,9 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         //   ① 配方声明的 engine  ② 运行时引擎自报  ③ 都没有 ⇒ 「未绑定引擎」托盘。
         func trayName(_ e: CatalogEntry) -> String {
             if let eng = e.recipe?.engine, !eng.isEmpty { return eng }
+            // 数据里指定的归属（modelOverrides.assignedEngine）优先于运行时自报：
+            // 生图模型由 ComfyUI 引擎服务，本身没有自己的配方。
+            if let eng = e.classifyEngine, !eng.isEmpty { return eng }
             if !e.engineName.isEmpty { return e.engineName }
             return "未绑定引擎"
         }

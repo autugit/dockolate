@@ -547,6 +547,8 @@ struct CatalogEntry {
     var hidden: Bool = false
     /// 命中的规则来源（`--explain` 打印，便于用户调规则）
     var classifyEvidence: String = ""
+    /// 数据里指定的归属引擎（托盘名），空则回落到配方/运行时自报
+    var classifyEngine: String? = nil
 }
 
 enum ModelCatalog {
@@ -617,6 +619,7 @@ enum ModelCatalog {
                                      diskGB: weightsGB, estMemGB: est.gb, estBasis: est.basis,
                                      diskPath: k)
             entry.hidden = res.hidden
+            entry.classifyEngine = res.assignedEngine
             entry.classifyEvidence = res.evidence
             entry.parts = g.parts.map { $0.identity.displayName + "（" + $0.identity.role.rawValue + "）" }
             entries.append(entry)
