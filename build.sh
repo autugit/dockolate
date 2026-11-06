@@ -67,8 +67,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>       <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key>           <string>1.8.1</string>
-    <key>CFBundleShortVersionString</key><string>1.8.1</string>
+    <key>CFBundleVersion</key>           <string>1.8.3</string>
+    <key>CFBundleShortVersionString</key><string>1.8.3</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleIconFile</key>          <string>Dockolate</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
@@ -94,11 +94,15 @@ cat > "$HUB_APP/Contents/Info.plist" <<HUBPLIST
     <key>CFBundleDisplayName</key>       <string>Dockolate Hub</string>
     <key>CFBundleExecutable</key>        <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>        <string>$BUNDLE_ID.hub</string>
-    <key>CFBundleVersion</key>           <string>1.8.1</string>
-    <key>CFBundleShortVersionString</key><string>1.8.1</string>
+    <key>CFBundleVersion</key>           <string>1.8.3</string>
+    <key>CFBundleShortVersionString</key><string>1.8.3</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>LSUIElement</key>               <true/>
+    <!-- 2026-11-06：只靠 LSUIElement + setActivationPolicy(.prohibited) 不够 ——
+         中枢每次启动，Dock 的「最近使用」仍会多出一条 Dockolate（实测 0.5 s 内出现），
+         于是重启/登录后 Dock 里就有两个图标。LSBackgroundOnly 才是「从不进 Dock」那面旗。 -->
+    <key>LSBackgroundOnly</key>         <true/>
     <key>NSHighResolutionCapable</key>   <true/>
     <key>NSPrincipalClass</key>          <string>NSApplication</string>
 </dict>

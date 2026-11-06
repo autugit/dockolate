@@ -4,6 +4,40 @@ All notable changes to Dockolate are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/).
 
+## [1.8.3] — 2026-11-06
+
+### Fixed — Dock 里出现多个同款图标
+
+- **一次性 CLI 模式不再向 LaunchServices 注册成前台 App**。链路是：界面每次做互斥判定都会
+  fork 一个自身副本（`MainWindow.runEnsure` → `Bundle.main.executablePath --ensure=…`），
+  副本里 `_ = NSApplication.shared` 让它以 `Foreground` 身份登记；Dock 的「最近使用」于是
+  每 fork 一次多一格，而且不会自动去重 —— 一本机的 `recent-apps` 里攒出三条同 bundle 的
+  记录，加上钉住的那条，正好是界面上的四个图标。
+- 新增 `cliApp()`：CLI 分支（`--ensure=` / `--release=` / `--mgmt-*` / `--explain=`）**连
+  `NSApplication` 都不创建**。只靠 `setActivationPolicy(.prohibited)` 仍会在 Dock 留格子，
+  真正的判据是「别让 LaunchServices 记一次 App 启动」；这些分支全链路只用 Foundation。
+- `DockolateHub` 的 Info.plist 增加 `LSBackgroundOnly`：后台中枢每次启动都会在「最近使用」
+  留一条记录，`LSUIElement` 不足以让它彻底不进 Dock。
+- Hub bundle 被 LaunchServices 直接拉起（`open -a` / 双击 / 登录恢复）时 argv 里没有 `--hub`，
+  旧代码会退化成「前台 GUI 副本」并抢走 `instance.lock`，让真正的 GUI 静默 `exit(0)`；
+  现在按 bundle id 判定，一律进后台模式。
+
+### Changed — 互斥判定改成进程内调用（不再 fork 自身）
+
+- `MainWindow.runEnsure` 每次判定都会 fork 一份自身可执行文件（`--ensure=… --json`），一次
+  界面动作就多一个进程、多一次 1.2 s 采样差分。现在改为**同进程**调用
+  `HubEnsure.decide(target:ask:forceSwitch:)`，采样放后台队列，结果回主线程弹窗。
+- `HubEnsure.run`（CLI 入口）拆成两层：`decide` 只算并返回 `Outcome`，`run` 负责打印与退出码；
+  `--ensure` / `--release` 的对外行为不变。
+- 新增 `--self-test-admit=<模型>`：在后台队列跑一次与界面完全相同的判定并打印结果，用来验证
+  「不再 fork 自身」这条路径（不建 AppKit、不动模型）。
+
+### Fixed — 「挂载待机」的模型不算互斥占用
+
+- 判断「谁在跑」时只认 `running` / `loading`，漏了 `idle`（模型已加载、占着内存但没在解码）。
+  于是一个占着几十 GB 的模型挂着待机时，中枢对「拉起另一个重模型」仍答「与在跑的模型不互斥」，
+  真叠上去会把机器压爆。界面各处一直是三态一起算，这里对齐。
+
 ## [1.8.1] — 2026-11-04
 
 ### Fixed — 引擎归属：ComfyUI 是引擎，不是模型

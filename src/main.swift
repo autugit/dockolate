@@ -840,6 +840,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - 入口
 // ============================================================
 
+// ---- 一次性 CLI 模式：不建 AppKit，也不以前台 App 身份注册 ----
+// 2026-11-06 实测：Dock 里同时出现 4 个 Dockolate 图标。当时的链路是
+//   GUI 每次判定互斥 → MainWindow.runEnsure fork 自身副本（Bundle.main.executablePath --ensure=…）
+//   → 副本里 `_ = NSApplication.shared` 让它以「前台 App」向 LaunchServices 注册
+//   → Dock 的「最近使用」每 fork 一次多一格（那时攒出三条同 bundle 的重复记录，互不合并）。
+// 两处都堵上了：GUI 已改为进程内调用（MainWindow.hubVerdict），CLI 分支也不再建 AppKit。
+func cliApp() {
+    // 只声明「不要 AppKit」，但**连 NSApplication.shared 都不创建**。
+    // 2026-11-06 第二轮实测：仅靠 setActivationPolicy(.prohibited) 不够 —— 子进程在
+    // lsappinfo 里确实是 BackgroundOnly，Dock 的「最近使用」仍旧会多出一格（--ensure 连跑
+    // 三次，格子 1→2）。真正的判据是「别让 LaunchServices 记一次 App 启动」，而不是
+    // 「记了但隐藏」。--ensure / --release / --mgmt-* / --explain 全链路只用 Foundation
+    // （Process / FileManager / Bundle），不建 NSApplication 也跑得通。
+    // 需要 AppKit 的一次性模式（--self-test-manager / --shot* / --demo*）另行显式创建。
+}
+
 // ---- 管理 API：给用户自己的 AI 用（一次一个 JSON 请求，一行 JSON 回答）----
 // 例：Dockolate --api '{"op":"model.add","model":{…}}'
 // 详见 docs/CLI_API.md；不依赖 GUI 是否在跑，也不碰程序本体。
@@ -854,7 +870,7 @@ if CommandLine.arguments.contains("--doctor") {
 
 // ---- 自检模式：--self-test-manager 管理器判据自检（分类 / 估算 / 三色 / 配方 / 日志解析）----
 if CommandLine.arguments.contains("--self-test-manager") {
-    _ = NSApplication.shared
+    _ = NSApplication.shared   // 自检要建视图，需要 AppKit
     exit(Int32(SelfTest().run()))
 }
 
@@ -883,7 +899,13 @@ if CommandLine.arguments.contains("--procs") {
 // 与界面共用同一套 ModelCatalog / ModelActionRunner：这是「拉起 / 卸载」链路的无 GUI 验收面。
 // ---- 中枢后台（M0：只采样 + 落状态文件，不调度、不碰引擎）----
 // 设计见 projects/01_本机模型栈/docs/本地模型中枢_方案v2.md
-if CommandLine.arguments.contains("--hub") {
+if CommandLine.arguments.contains("--hub")
+    || (CommandLine.arguments.count <= 1
+        && Bundle.main.bundleIdentifier == "io.github.autugit.dockolate.hub") {
+    // 2026-11-06：DockolateHub.app 被 LaunchServices 直接拉起（open -a / 双击 / 登录恢复）
+    // 时 argv 里没有 --hub —— 旧代码于是走「前台 GUI」分支，不但画出一个没用的窗口，还会
+    // 抢走 instance.lock，让真正的 Dockolate 打不开（实测：GUI 静默 exit(0)，看不出原因）。
+    // 判据用 bundle id 而不是路径：路径可以换，bundle id 是它的身份。
     let backgroundApp = NSApplication.shared
     // 关键：后台中枢必须声明为 .prohibited。
     // 否则它会被当成「已经在跑的 Dockolate」，用户点图标时单实例逻辑只去 activate 它，
@@ -926,9 +948,33 @@ if CommandLine.arguments.contains("--hub-status") {
     exit(0)
 }
 
+// ---- 自检：--self-test-admit=<模型> 进程内互斥判定 ----
+// 复现 GUI 的真实路径：判定跑在后台队列（GUI 用的就是这条），但**不建 AppKit**
+// —— 建了就会向 LaunchServices 登记一次 App 启动，Dock 的「最近使用」多一格，
+// 自检工具不该污染用户 Dock。HubEnsure.decide 全链路只用 Foundation，不需要 NSApplication。
+if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--self-test-admit=") }) {
+    let id = a.replacingOccurrences(of: "--self-test-admit=", with: "")
+    let sem = DispatchSemaphore(value: 0)
+    var outcome: HubEnsure.Outcome?
+    let t0 = Date()
+    DispatchQueue.global(qos: .userInitiated).async {
+        outcome = HubEnsure.decide(target: id, ask: false, forceSwitch: false)
+        sem.signal()
+    }
+    if sem.wait(timeout: .now() + 180) == .timedOut {
+        print("自检超时（180s）：decide 没回来")
+        exit(9)
+    }
+    guard let o = outcome else { print("自检失败：无结果"); exit(1) }
+    print(String(format: "decide 用时 %.1fs · code=%d · kind=%@ · already=%d · blockers=%@ · msg=%@",
+                 Date().timeIntervalSince(t0), o.code, o.kind, o.alreadyRunning ? 1 : 0,
+                 o.blockers.joined(separator: ","), o.message))
+    exit(o.code)
+}
+
 // ---- 互斥前置检查（M1a）：默认拒绝，--ask 才弹窗问人 ----
 if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--ensure=") }) {
-    _ = NSApplication.shared
+    cliApp()
     let target = a.replacingOccurrences(of: "--ensure=", with: "")
     let ask = CommandLine.arguments.contains("--ask")
     let force = CommandLine.arguments.contains("--switch")
@@ -938,7 +984,7 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--ensure=") }) {
 
 // ---- 只卸并等内存还回来（M1b）：--release=<模型> ----
 if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--release=") }) {
-    _ = NSApplication.shared
+    cliApp()
     let target = a.replacingOccurrences(of: "--release=", with: "")
     exit(HubEnsure.release(target: target, asJSON: CommandLine.arguments.contains("--json")))
 }
@@ -946,7 +992,7 @@ if let a = CommandLine.arguments.first(where: { $0.hasPrefix("--release=") }) {
 if CommandLine.arguments.contains("--mgmt-list")
     || CommandLine.arguments.contains(where: { $0.hasPrefix("--mgmt-action=") })
     || CommandLine.arguments.contains(where: { $0.hasPrefix("--explain=") }) {
-    _ = NSApplication.shared
+    cliApp()
     let cfg = LauncherConfig.load()
     let watcher = EngineWatcher()
     _ = watcher.refresh()
