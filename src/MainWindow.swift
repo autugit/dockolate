@@ -860,45 +860,26 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         start()
     }
 
-    // MARK: - 中枢准入（拉起前的判定交给 --ensure，GUI 不自行判断互斥）
+    // MARK: - 中枢准入（判定交给 HubEnsure，GUI 不自行判断互斥）
+    //
+    // 2026-11-06 用户令：改成**进程内**调用。原实现每次判定都 fork 一份自身可执行文件
+    // （`Bundle.main.executablePath --ensure=… --json`）——一次界面动作就多一个进程、
+    // 多一次 1.2 s 采样差分，还是 Dock「最近使用」里多出格子的历史来源。
+    // 现在同进程算，采样放后台队列（不能卡主线程），结果回主线程弹窗。
 
-    private struct HubVerdict {
-        let allowed: Bool
-        let message: String
-        let blockers: [String]
-    }
-
-    private func runEnsure(_ args: [String], completion: @escaping (HubVerdict) -> Void) {
-        guard let exe = Bundle.main.executablePath else {
-            completion(HubVerdict(allowed: true, message: "无法定位自身可执行文件，按放行处理", blockers: []))
-            return
-        }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { proc in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let code = proc.terminationStatus
-            let msg = (obj?["message"] as? String) ?? ""
-            let blockers = (obj?["blockers"] as? [String]) ?? []
-            DispatchQueue.main.async {
-                completion(HubVerdict(allowed: code == 0, message: msg, blockers: blockers))
-            }
-        }
-        do { try p.run() } catch {
-            completion(HubVerdict(allowed: true, message: "准入程序启动失败：\(error.localizedDescription)", blockers: []))
+    private func hubVerdict(id: String, forceSwitch: Bool,
+                            completion: @escaping (HubEnsure.Outcome) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = HubEnsure.decide(target: id, ask: false, forceSwitch: forceSwitch)
+            DispatchQueue.main.async { completion(outcome) }
         }
     }
 
     private func hubAdmit(entry: CatalogEntry, completion: @escaping (Bool) -> Void) {
         guard let pol = HubPolicies.policy(for: entry) else { completion(true); return }  // 没策略：沿用旧行为
-        runEnsure(["--ensure=\(pol.id)", "--json"]) { [weak self] verdict in
+        hubVerdict(id: pol.id, forceSwitch: false) { [weak self] verdict in
             guard let self = self else { return }
-            if verdict.allowed { completion(true); return }
+            if verdict.code == 0 { completion(true); return }
 
             let a = NSAlert()
             a.messageText = "中枢拒绝拉起「\(entry.title)」"
@@ -910,9 +891,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             guard a.runModal() == .alertSecondButtonReturn else { completion(false); return }
 
-            // 用户明确选择切换，才走 --switch
-            self.runEnsure(["--ensure=\(pol.id)", "--switch", "--json"]) { switched in
-                if switched.allowed {
+            // 用户明确选择切换，才真的切（forceSwitch）——同样进程内跑：
+            // 停旧的 + 等内存 + 起新的要十几秒，放后台队列，别卡界面
+            self.hubVerdict(id: pol.id, forceSwitch: true) { switched in
+                if switched.code == 0 {
                     completion(true)
                 } else {
                     let f = NSAlert()

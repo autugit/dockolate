@@ -49,7 +49,11 @@ enum HubEnsure {
             + invCfg.extraDirs + runtime.modelDirs
         let entries = ModelCatalog.build(units: units, runtime: runtime, config: cfg,
                                          observed: ObservedMemory(), roots: roots)
-        return (entries.filter { $0.state == .running || $0.state == .loading }, runtime)
+        // 2026-11-06：把「挂载待机」（.idle = 模型已加载、占着内存但没在解码）也算进来。
+        // 旧实现只认 .running / .loading，于是一个占着几十 GB 的模型挂着待机时，中枢对「拉起
+        // 另一个重模型」仍旧答「与在跑的模型不互斥」——那个模型的启动脚本并不会替别人腾内存，
+        // 真叠上去就把机器压爆。界面各处一直是三态一起算，这里对齐。
+        return (entries.filter { [.running, .idle, .loading].contains($0.state) }, runtime)
     }
 
     /// 该清单条目对应哪条策略：先按 recipe 对齐，再按标题/运行时名做宽松匹配
@@ -63,7 +67,12 @@ enum HubEnsure {
         }
     }
 
+    /// 一次性 CLI 入口：判定 → 按需打印 JSON / 纯文本 → 返回退出码。
     static func run(target: String, ask: Bool, forceSwitch: Bool, asJSON: Bool) -> Int32 {
+        emit(decide(target: target, ask: ask, forceSwitch: forceSwitch), asJSON)
+    }
+
+    static func decide(target: String, ask: Bool, forceSwitch: Bool) -> Outcome {
         let cfg = LauncherConfig.load()
         let reg = HubRegistry.load()
 
@@ -72,9 +81,9 @@ enum HubEnsure {
             p.id == target || p.aliases.contains(target)
         }) else {
             let known = reg.entries.keys.sorted().joined(separator: ", ")
-            return emit(Outcome(code: 5, kind: "unknown",
-                                message: "registry 里没有模型「\(target)」。已知：\(known)",
-                                target: target), asJSON)
+            return Outcome(code: 5, kind: "unknown",
+                           message: "registry 里没有模型「\(target)」。已知：\(known)",
+                           target: target)
         }
 
         let (running, _) = runningEntries(cfg: cfg)
@@ -84,9 +93,9 @@ enum HubEnsure {
             let hay = (e.title + " " + e.runtimeName).lowercased()
             return hay.contains(targetPolicy.id.lowercased())
         }) {
-            return emit(Outcome(code: 0, kind: "ok",
-                                message: "「\(targetPolicy.id)」已在运行（pid \(me.pid ?? 0)）",
-                                target: targetPolicy.id, alreadyRunning: true), asJSON)
+            return Outcome(code: 0, kind: "ok",
+                           message: "「\(targetPolicy.id)」已在运行（pid \(me.pid ?? 0)）",
+                           target: targetPolicy.id, alreadyRunning: true)
         }
 
         // 3. 找互斥冲突：双向判断（对方的 mutex_with 里点名我，也算冲突）
@@ -103,16 +112,16 @@ enum HubEnsure {
         //     先报「有未登记占用」，再谈互斥。
         let stray = unregisteredOccupancy(cfg: cfg, running: running)
         if !stray.isEmpty {
-            return emit(Outcome(code: 7, kind: "unregistered",
-                                message: "有未登记引擎在跑：" + stray.joined(separator: "；")
+            return Outcome(code: 7, kind: "unregistered",
+                           message: "有未登记引擎在跑：" + stray.joined(separator: "；")
                                        + "。先用 --release 收掉，或把它登记进 registry.json",
-                                target: targetPolicy.id), asJSON)
+                           target: targetPolicy.id)
         }
 
         guard !blockers.isEmpty else {
-            return emit(Outcome(code: 0, kind: "ok",
-                                message: "「\(targetPolicy.id)」与在跑的模型不互斥，可按需拉起",
-                                target: targetPolicy.id), asJSON)
+            return Outcome(code: 0, kind: "ok",
+                           message: "「\(targetPolicy.id)」与在跑的模型不互斥，可按需拉起",
+                           target: targetPolicy.id)
         }
 
         let names = blockers.map { "\($0.1.id)（端口 \($0.0.port.map(String.init) ?? "?")）" }
@@ -120,8 +129,8 @@ enum HubEnsure {
 
         // 4a. 不要求切换 → 默认拒绝，把占用者报清楚
         if !ask && !forceSwitch {
-            return emit(Outcome(code: 4, kind: "busy", message: busyMsg + "；默认不抢占",
-                                target: targetPolicy.id, blockers: blockers.map { $0.1.id }), asJSON)
+            return Outcome(code: 4, kind: "busy", message: busyMsg + "；默认不抢占",
+                           target: targetPolicy.id, blockers: blockers.map { $0.1.id })
         }
 
         // 4b. 问人（或强制切）
@@ -129,16 +138,16 @@ enum HubEnsure {
             let ok = askUser(title: "本地模型互斥",
                              text: busyMsg + "。\n\n要停掉它并切换到「\(targetPolicy.id)」吗？")
             if !ok {
-                return emit(Outcome(code: 4, kind: "busy", message: busyMsg + "；用户选择不切换",
-                                    target: targetPolicy.id, blockers: blockers.map { $0.1.id }), asJSON)
+                return Outcome(code: 4, kind: "busy", message: busyMsg + "；用户选择不切换",
+                               target: targetPolicy.id, blockers: blockers.map { $0.1.id })
             }
         }
 
         // 5. 执行切换：先停占用者 → 等内存真的还回来（M1b）→ 再拉起目标
         guard let targetEntry = entriesByRecipe(targetPolicy.recipe, cfg: cfg) else {
-            return emit(Outcome(code: 5, kind: "unknown",
-                                message: "找不到「\(targetPolicy.id)」对应的清单条目（recipe \(targetPolicy.recipe ?? "?")）",
-                                target: targetPolicy.id), asJSON)
+            return Outcome(code: 5, kind: "unknown",
+                           message: "找不到「\(targetPolicy.id)」对应的清单条目（recipe \(targetPolicy.recipe ?? "?")）",
+                           target: targetPolicy.id)
         }
         let baseline = ReleaseGate.availableGB(reserveGB: cfg.reserveGB)
         let runner = ModelActionRunner()
@@ -155,23 +164,23 @@ enum HubEnsure {
                                           reserveGB: cfg.reserveGB,
                                           timeout: 120)
         guard gate.ok else {
-            return emit(Outcome(code: 6, kind: "failed",
-                                message: "已停止 " + stopped.joined(separator: "、")
+            return Outcome(code: 6, kind: "failed",
+                           message: "已停止 " + stopped.joined(separator: "、")
                                        + "，但内存没还回来：" + gate.detail
                                        + "；为免两个模型叠在残骸上，未拉起「\(targetPolicy.id)」",
-                                target: targetPolicy.id, switchedFrom: stopped), asJSON)
+                           target: targetPolicy.id, switchedFrom: stopped)
         }
         runner.launch(targetEntry)
         let launched = waitIdle(runner, id: targetEntry.id)
         if launched {
-            return emit(Outcome(code: 0, kind: "switched",
-                                message: "已停止 " + stopped.joined(separator: "、") + "，并拉起「\(targetPolicy.id)」",
-                                target: targetPolicy.id, switchedFrom: stopped), asJSON)
+            return Outcome(code: 0, kind: "switched",
+                           message: "已停止 " + stopped.joined(separator: "、") + "，并拉起「\(targetPolicy.id)」",
+                           target: targetPolicy.id, switchedFrom: stopped)
         }
         let detail = runner.state(for: targetEntry.id)?.detail ?? "未知原因"
-        return emit(Outcome(code: 6, kind: "failed",
-                            message: "已停止 " + stopped.joined(separator: "、") + "，但拉起「\(targetPolicy.id)」失败：\(detail)",
-                            target: targetPolicy.id, switchedFrom: stopped), asJSON)
+        return Outcome(code: 6, kind: "failed",
+                       message: "已停止 " + stopped.joined(separator: "、") + "，但拉起「\(targetPolicy.id)」失败：\(detail)",
+                       target: targetPolicy.id, switchedFrom: stopped)
     }
 
     // ---------- 只卸：停 + 等内存真的还回来（M1b） ----------
