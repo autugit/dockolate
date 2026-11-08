@@ -24,13 +24,77 @@ VARIANT = "dock"
 BLEED = False            # True = 四格顶满图标（--crop 时自动打开）
 
 
-def apply_bevel(im: Image.Image) -> Image.Image:
-    """给已经套好圆角遮罩的图标加「内收倒角」：边缘一圈斜边 + 受光/背光。
+def rounded_mask(size: int, radius_ratio: float = RADIUS_RATIO, ss: int = 4) -> Image.Image:
+    """抗锯齿的圆角遮罩：在 ss 倍画布上画，再缩回来。
 
-    为什么不用贴图：倒角必须严格贴着圆角边界，程序化画才能保证边对边对齐；
-    生成图里的倒角一旦和遮罩差几像素，就会露出一条浅边。
-    v2：整圈改成**柔化**的厚度过渡（大半径高斯），不再用硬描边——
-    硬描边看起来像贴上去的一圈亮线，柔化后才像板子边缘转下去。
+    直接在小画布上 fill=255 得到的是硬边（台阶），放大看就是「圆角不圆、边缘发毛」；
+    缩样后 alpha 才是连续过渡，边缘才干净。
+    """
+    big = size * ss
+    m = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(m).rounded_rectangle([0, 0, big - 1, big - 1],
+                                       radius=int(big * radius_ratio), fill=255)
+    return m.resize((size, size), Image.LANCZOS)
+
+
+def apply_chamfer(im: Image.Image, width_ratio: float = 0.032, angle_deg: float = 52.0) -> Image.Image:
+    """按「圆角矩形 SDF + 法线光照」画内收倒角（v3）。
+
+    v1/v2 的问题：用「一圈亮带 + 斜向渐变」近似倒角，四角的亮度只跟 x+y 有关，
+    所以左上角过亮、右下角过暗且发虚，四个角看起来不像同一块料。
+    现在改成真几何：先算圆角矩形的有符号距离场，边缘 W 像素内把表面法线
+    从「朝上」逐渐转到「朝外」（= 斜边），再用一束左上方的平行光算法线光照
+    （漫反射 + Blinn 高光）。四个角自然一致，斜边也跟着圆角真正地转下去。
+    """
+    import numpy as np
+
+    S = im.size[0]
+    R = int(S * RADIUS_RATIO)
+    W = max(6.0, S * width_ratio)
+    c = S / 2.0
+
+    axis = np.arange(S, dtype=np.float32) + 0.5 - c
+    X, Y = np.meshgrid(axis, axis)
+    qx = np.abs(X) - (c - R)
+    qy = np.abs(Y) - (c - R)
+    d = np.minimum(np.maximum(qx, qy), 0.0) + np.sqrt(
+        np.maximum(qx, 0.0) ** 2 + np.maximum(qy, 0.0) ** 2) - R   # <0 在图标内部
+
+    s = np.clip(-d / W, 0.0, 1.0)          # 1 = 最外沿，0 = 斜边以内
+    gy, gx = np.gradient(-d)               # 指向外侧的 2D 法线
+    n = np.hypot(gx, gy)
+    n[n < 1e-6] = 1.0
+    nx, ny = gx / n, gy / n
+
+    a = np.deg2rad(angle_deg) * s          # 斜边倾角：由平面渐变到斜面
+    NX, NY, NZ = nx * np.sin(a), ny * np.sin(a), np.cos(a)
+
+    L = np.array([-0.42, -0.52, 0.74], dtype=np.float32)
+    L /= np.linalg.norm(L)                 # 左上方平行光
+    diff = np.clip(NX * L[0] + NY * L[1] + NZ * L[2], 0.0, 1.0)
+    Hh = L + np.array([0, 0, 1.0], dtype=np.float32)
+    Hh /= np.linalg.norm(Hh)
+    spec = np.clip(NX * Hh[0] + NY * Hh[1] + NZ * Hh[2], 0.0, 1.0) ** 26
+
+    ramp = (diff - L[2]) * (s > 0.0)       # 相对「平面」的明暗变化
+    mult = 1.0 + ramp * 1.10 - (s ** 2) * 0.12   # 受光侧提亮 / 背光侧压暗 / 最外沿收一圈
+    mult = np.clip(mult, 0.35, 1.6)
+    spec_add = (spec * (s ** 1.2) * 0.45)[..., None] * np.array([255, 238, 206], dtype=np.float32)
+
+    rgb = np.asarray(im.convert("RGB"), dtype=np.float32) * mult[..., None] + spec_add
+    out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
+    out = out.filter(ImageFilter.GaussianBlur(0.7))      # 抹掉色阶，但边缘仍靠 alpha 保持锐利
+
+    res = out.convert("RGBA")
+    res.putalpha(im.split()[3])
+    return res
+
+
+def apply_bevel(im: Image.Image) -> Image.Image:
+    """老版倒角（无 numpy 时的兜底）。
+
+    用「一圈亮带 + 斜向渐变」近似，四角亮度只随 x+y 变化，效果不如 apply_chamfer，
+    仅在没有 numpy 的环境里使用。
     """
     S = im.size[0]
     R = int(S * RADIUS_RATIO)
@@ -102,10 +166,7 @@ def render_small(n: int) -> Image.Image:
         cr = max(1.2, cell * 0.23)
         cx = cy = n / 2
         d.ellipse([cx - cr, cy - cr, cx + cr, cy + cr], fill=amber)
-    mask = Image.new("L", (n, n), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, n - 1, n - 1],
-                                           radius=round(n * RADIUS_RATIO), fill=255)
-    im.putalpha(mask)
+    im.putalpha(rounded_mask(n, ss=8))
     return im
 
 
@@ -173,15 +234,15 @@ def main() -> int:
         dark = Image.new("RGBA", (FINAL, FINAL), (26, 14, 8, 255))
         im = Image.composite(im, Image.blend(im, dark, 0.42), vig)
 
-    mask = Image.new("L", (FINAL, FINAL), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        [0, 0, FINAL - 1, FINAL - 1], radius=int(FINAL * RADIUS_RATIO), fill=255)
+    mask = rounded_mask(FINAL)
     im.putalpha(mask)
 
-    # 顶满（--crop）时给边缘加一圈内收倒角：斜边受光/背光，读起来是一块有厚度的板，
-    # 而不是一张被圆角裁出来的照片
+    # 顶满（--crop）时给边缘加一圈内收倒角：按 SDF 做法线光照（无 numpy 时退回老版）
     if BLEED:
-        im = apply_bevel(im)
+        try:
+            im = apply_chamfer(im)
+        except ImportError:
+            im = apply_bevel(im)
 
     preview = os.path.join(out_dir, f"preview-{name}-1024.png")
     im.save(preview)
