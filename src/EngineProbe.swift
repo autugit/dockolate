@@ -949,7 +949,7 @@ final class EngineWatcher {
         for hit in hits {
             let holder = procs.first { $0.ports.contains(hit.port) }
             // 进程树聚合：Splash 1.4 的权重与计算都在 serve-native 子进程里，父进程只是 HTTP 壳
-            // （只按端口取 holder 会报出 0.41 GB / 挂载待机，而实际是 27 GB 在解码）。
+            // （只按端口取 holder 会报出「挂载待机 / 只有父进程那点内存」，而实际是几十 GB 在解码）。
             let running = holder.map { treeRunning($0.pid) } ?? false
             let memBytes = holder.map { treeMemBytes($0.pid) } ?? 0
             if let h = holder { claimed.insert(h.pid) }

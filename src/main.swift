@@ -490,7 +490,7 @@ final class ProcessSampler {
 
     /// 内存占用：phys_footprint（活动监视器同款口径），走 libproc 而非 ps。
     /// 为什么不用 ps 的 rss：实测对 mmap 大户会少报一个数量级
-    /// （Python 进程真实 23 GB，ps rss 只报 ~1 GB；python3.11 真实 18 GB，ps 几乎不显示）。
+    /// （Python 进程真实二十多 GB，ps rss 只报 ~1 GB；另一个解释器进程真实十几 GB，ps 几乎不显示）。
     func topMemory(_ n: Int = 3) -> [ProcStat] {
         var pids = [pid_t](repeating: 0, count: 8192)
         let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids,

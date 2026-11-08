@@ -1654,7 +1654,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         var slots: [MemoryReservoirView.ModelSlot] = []
         for e in running {
             // 驻留量 = 进程**树** RSS（启动器 + 引擎子进程）。footprint 不计 mmap 的权重页
-            // （实测 125B：18 GB ↔ RSS 进程树 RSS 的大头），会把最大的模型错记成「系统与其他」。
+            // （大模型：footprint 只有进程树 RSS 的三分之一左右），会把最大的模型错记成「系统与其他」。
             let resident = e.pid.flatMap { MemoryPoolBar.subtreeRSSGiB(rootPid: $0) } ?? e.memGB
             let color: NSColor
             switch e.state {

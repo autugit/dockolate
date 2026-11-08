@@ -14,7 +14,7 @@
 //   · 宽度统一：模型列与层块同一段可用宽度
 //
 // 口径：模型驻留 = 进程树 RSS（启动器 + 引擎子进程）。footprint 不计 mmap 的权重页
-//       （实测 125B：18 GB ↔ RSS 进程树 RSS 的大头），会把最大的模型错记成「系统与其他」。
+//       （大模型：footprint 只有进程树 RSS 的三分之一左右），会把最大的模型错记成「系统与其他」。
 
 import AppKit
 
@@ -230,7 +230,7 @@ final class MemoryReservoirView: NSView {
         } else {
             let rx = size.width - inset - legendW
             // 2026-11-04 用户裁定：池外小箱挪到最左并明显缩小，刻度紧贴池子左壁——
-            // 否则刻度画在小箱右边，看着像「池外池也只有 整机容量」。
+            // 否则刻度画在小箱右边，看着像「池外池也有整机容量」。
             let boxX = inset
             let tankX = boxX + boxWidthWide + offBoxTickGap + tickW
             let tankW = max(180, rx - 14 - tankX)

@@ -68,7 +68,7 @@ final class MemoryPoolBar: NSView {
     }
 
     /// 进程 RSS（GiB）。池子/方块用这个口径：mmap 进来的权重页确实占着内存，
-    /// `ri_phys_footprint` 不算它们（实测 125B：footprint 18 GB ↔ RSS 进程树 RSS 的大头），
+    /// `ri_phys_footprint` 不算它们（大模型：footprint 只有进程树 RSS 的三分之一左右），
     /// 会把最大那块模型错记成「系统与其他」。
     static func rssGiB(pid: pid_t) -> Double? {
         var info = proc_taskinfo()
@@ -101,7 +101,7 @@ final class MemoryPoolBar: NSView {
     }
 
     /// 引擎自报的 RAM 用量（/metrics → hardware.ram_used），单位 GiB。
-    /// 用户裁定：池内模型段用这个数，不用面板里那套 23.56 GB 的口径。
+    /// 用户裁定：池内模型段用这个数，不用面板里那套口径。
     static func engineResidentGiB(port: Int?) -> Double? {
         guard let port, port > 0,
               let obj = LocalHTTP.json(port: port, path: "/metrics") as? [String: Any] else { return nil }

@@ -164,7 +164,7 @@ struct LaunchRecipe {
 
     /// 配方 ↔ 一个磁盘/运行时模型 是否指同一个东西。
     /// ⚠️ 名字只比「标题 + 路径最后一段」：拿整条路径比会把 HF 缓存里
-    /// `models--org--某个名字` 的另一份副本也算成同一个模型（实测会把 26 GB 估算挂到 localfourbit 上）。
+    /// `models--org--某个名字` 的另一份副本也算成同一个模型（实测会把估算值挂到 localfourbit 上）。
     func matches(name: String, path: String?, engine: String?, port: Int?) -> Bool {
         if let rp = self.path, let p = path, realPathEqual(rp, p) { return true }
         let tail = ((path ?? "") as NSString).lastPathComponent
@@ -348,7 +348,7 @@ final class ObservedMemory {
 
     func value(for key: String) -> Double? { values[key] }
 
-    /// 只升不降：一次跑出 28 GB，下次估算就别退回 20 GB
+    /// 只升不降：一次跑出偏大的值，下次估算就别退回偏小
     func note(key: String, memGB: Double) {
         guard memGB > 0.2 else { return }
         if let old = values[key], old >= memGB { return }
@@ -498,9 +498,9 @@ struct MemoryBudget {
 
     /// 可用 = 总 − 唯一的「已用」 − 预留
     ///
-    /// ⛔ 2026-10-31 实测：27B(27 GB) + H3-8bit(32 GB) 同驻时，wired 61 GB、模型 55.6 GB ——
+    /// ⛔ 实测：大模型与视频模型同驻时，wired 与模型占用会逼近物理内存上限 ——
     ///    模型的 Metal 页**同时**算进 wired 与「应用内存」，两者相加会超过物理内存，
-    ///    旧公式给出「可用 0.0 GB」，而机器实际还有 4 GB 空闲页 + 65 GB 可回收缓存、压力 32%。
+    ///    旧公式给出「可用 0.0 GB」，而机器实际还有空闲页和大量可回收缓存、压力并不高。
     ///    所以这里取 max(wired, 模型驻留) 而不是求和：同一批页只扣一次。
     var availableGB: Double {
         if wiredGB > 0 || compressedGB > 0 || modelResidentGB > 0 {
@@ -805,7 +805,7 @@ enum ModelCatalog {
                         ? "配方没有 stop 命令：只能结束进程（pid \(e.pid ?? 0)）"
                         : "配方没有 stop 命令"
                 }
-                // 配方声明优先于启发式：MoE + mmap 的模型权重不等于常驻（125B 的 78 GB 文件只驻 18 GB），
+                // 配方声明优先于启发式：MoE + mmap 的模型权重不等于常驻（大模型的权重文件远大于实际常驻），
                 // 只有写配方的人知道这台机器上它到底占多少。
                 if let declared = r.estMemGB, declared > 0 {
                     e.estMemGB = declared

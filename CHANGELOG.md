@@ -73,7 +73,7 @@ All notable changes to Dockolate are documented here. Format follows
 
 ### Fixed
 
-- 内存池刻度画在了「池外」小箱右侧，看起来像小箱也有 整机容量 的刻度：现在刻度紧贴池壁，
+- 内存池刻度画在了「池外」小箱右侧，看起来像小箱也带整机容量的刻度：现在刻度紧贴池壁，
   池外小箱挪到最左、明显缩小（更窄更矮），不再与池壁刻度共用一个视觉轴。
 - 配方匹配用字符串包含判断，导致一个配方的运行状态被写到另一个模型的卡片上（幽灵卡片、重复卡片）。
 - 停止命令在「没有进程可杀」时返回非零退出码，被误报成「停止失败」。
@@ -107,15 +107,15 @@ All notable changes to Dockolate are documented here. Format follows
 - 模型改为**按体积竖直叠放**：并排多列会让各列起始高度错开，并在高处留出读不出含义的空白。
 - 色块高度 ≥ 17 pt（按字体量出）才在块内居中写名字，低于阈值不写（名字仍在图例里）。
 - 修**假溢出**：`系统 / 应用与其他 / 压缩` 按权重分「已用 − Σ模型」，不再把模型的 Metal 页
-  既算进 wired 又算进模型列（实测（同机复现）算出 超过物理内存的合计）。
+  既算进 wired 又算进模型列（实测（同机复现）会算出超过物理内存的合计）。
 - 新增验收：`--demo-pool` / `--demo-pool=overflow` 与 `--dump-pool`（导出与绘制同源的几何）。
 
 ### Added — 内存蓄水池（冰山视图 · 已被第四版取代）
 
 - 「内存池」条换成**竖直蓄水池**：顶部模型（实心＝已驻留 / 虚线＝未加载）→ 空闲 →
   沉底（应用与其他 / 系统内核 / 压缩 / **预留在最底**）。
-- **驻留口径改进程树 RSS**：footprint 不计 mmap 权重页（125B：18 GB ↔ RSS 进程树 RSS 的大头），
-  实测让「系统与其他」缩掉大半 —— 原先那块巨大灰条的真因。
+- **驻留口径改进程树 RSS**：footprint 不计 mmap 权重页（大模型：只有进程树 RSS 的三分之一左右），
+  实测让「系统与其他」那根巨大灰条缩掉大半 —— 原先那块灰条的真因。
 - **池内不写字**：层名与数字全在右侧图例（配小色块），池内只靠拉开颜色的色块区分。
 - **版式统一**：所有色块圆角矩形（r=3）+ 统一 3 pt 窄缝；薄层（<4 pt）不缩缝、改用 r=1.5，
   空闲带加 0.8 pt 描边，保证 1–2 GB 的空闲也看得见。
@@ -222,7 +222,7 @@ H3 配方的 `log` 路径原本指向一个不存在的文件名，已改成实�
   应该只对**真的在内存里**的模型（运行 / 待机 / 加载中）生效。现在未运行的条目只有「拉起」可点，
   运行中的才亮「卸载」（无 stop 配方时退化为结束进程，tooltip 说明）。
 - **内存口径在 GPU 高负载时虚高**：macOS 26+ 的 Metal 显存既算匿名页也算 wired，
-  「应用 + 联动 + 压缩」会超过物理内存（实测 超过物理内存的合计，已超过物理内存），「可用」永远是 0、
+  「应用 + 联动 + 压缩」会超过物理内存（实测会算到超过物理内存的合计），「可用」永远是 0、
   管理器把所有模型都判成放不下。现在超过物理内存时改用 `max(应用, 联动) + 压缩`，
   窗口里两段合并成「应用+显存」并注明重叠；常规机器仍走老口径。
 - **进程识别**：`python -m serve/server.py --engine strata` 这类包装进程现在能认出引擎名
@@ -432,18 +432,18 @@ bash tests/verify_all.sh        # 三套回归 + 一趟「干净环境」冒烟�
 
 - **A model whose weights live in a child process was reported as an idle shell.**
   Each engine row took its memory and activity from whichever process *listens* on
-  the port. 某 MLX 引擎 serves HTTP from a small Python parent (≈0.4 GB) and runs the
-  model in an `engine/splash serve-native` child (27–40 GB, all the GPU work), so the
-  row read **「挂载待机 / 0.41 GB」** while the machine sat at 60–85 % GPU decoding —
+  the port. 某 MLX 引擎 serves HTTP from a small Python parent and runs the
+  model in an `engine/splash serve-native` child (tens of GB, all the GPU work), so the
+  row read **「挂载待机 / 只有父进程那点内存」** while the machine sat at 60–85 % GPU decoding —
   and `splash` was not in the process-name hints at all, so the child was never
   scanned to begin with.
 - Fix: `splash` added to the process hints; every engine row now aggregates memory
   and CPU/GPU activity across the holder's **process tree** (`ppid` read via
   `PROC_PIDTBSDINFO`), and descendants of a claimed holder are skipped instead of
   being listed a second time.
-- Verified live (2026-10-23, Apple Silicon): row went from `挂载待机 0.41 GB` to
-  `正在运行 父 + 子合并后的合计` with `splash` showing 85 % GPU. Cross-check: the app's own
-  top-memory list read 子进程的真实占用 for the child, and 0.41 + 35.12 = 35.53 matches the
+- Verified live (2026-10-23, Apple Silicon): row went from `挂载待机`（只看到父进程） to
+  `正在运行`（父 + 子合并）with the engine showing 85 % GPU. Cross-check: the app's own
+  top-memory list read the same figure for the child, and parent + child matched the
   reported total.
 - Whitelist verified with a fake OpenAI-compatible server on a spare port: it was picked up
   as `Xinference` and listed both served model ids, with no duplicate row for the

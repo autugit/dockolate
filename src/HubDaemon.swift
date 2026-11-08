@@ -112,7 +112,7 @@ final class HubDaemon {
         }
 
         // 只列「此刻在跑的」。完整权重清单由 GUI 写。
-        // ⛔ 这里曾经跑 ModelInventory.scan()（每 5 秒全盘一遍）：daemon 常驻 RSS 涨到 1.4 GB、
+        // ⛔ 这里曾经跑 ModelInventory.scan()（每 5 秒全盘一遍）：daemon 常驻 RSS 涨到 GB 级、
         //    CPU 峰值 28%，而这份完整清单并没有任何外部消费者（网关只判引擎活跃）。
         let models: [[String: Any]] = runtime.rows.map { row in
             var d: [String: Any] = [

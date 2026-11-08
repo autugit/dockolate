@@ -212,7 +212,7 @@ Adding an engine is one line in `kindHints`; the detection logic does not change
 Custom ports go in `engines.json`.
 
 Some engines run as **two processes** — a small parent that serves HTTP and a child
-that holds the weights and does all the GPU work (某 MLX 引擎: a 0.4 GB Python parent
+that holds the weights and does all the GPU work (某 MLX 引擎: a small Python parent
 plus a multi-GB `serve-native` child). Memory and the "is it computing" decision are
 aggregated over the **whole process tree**, so the row never reports just the parent.
 
@@ -296,7 +296,7 @@ state strings the app does not know are shown verbatim.
 
 Memory is `ri_phys_footprint` (Activity Monitor's "Memory" column), not RSS:
 RSS can under-report by an order of magnitude for mmap-heavy models
-(measured: ComfyUI shows 62 MB via `ps` and 数十 GB via `phys_footprint`).
+(measured: a ComfyUI-style engine shows tens of MB via `ps` and tens of GB via `phys_footprint` — three orders of magnitude apart).
 
 ## Configuration (optional)
 
