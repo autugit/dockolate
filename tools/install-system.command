@@ -41,6 +41,22 @@ sleep 1
 echo "==> 安装（整体替换，先留旧版到 ~/Applications/_prev）"
 mkdir -p "$HOME/Applications/_prev"
 STAMP=$(date +%Y%m%d-%H%M%S)
+
+# 先清扫历史残留：/Applications 里 _Dockolate*.app 这类「旧版改名包」是早期替换流程
+# 留下的孤儿（没有任何 LaunchAgent 引用），会让「应用程序」里堆出一排重复图标。
+# 一律挪进 _prev 留档，不删除。
+shopt -s nullglob
+for stale in /Applications/_Dockolate*.app; do
+  base="$(basename "$stale" .app)"
+  if sudo mv "$stale" "$HOME/Applications/_prev/$base-$STAMP.app"; then
+    sudo chown -R "$UID_NUM":staff "$HOME/Applications/_prev/$base-$STAMP.app" 2>/dev/null || true
+    echo "   · 残留已归位 _prev/$base-$STAMP.app"
+  else
+    echo "   ⚠ 残留 $base 挪不动，跳过"
+  fi
+done
+shopt -u nullglob
+
 for pair in "$APP_DST:Dockolate" "$HUB_DST:DockolateHub"; do
   dst="${pair%%:*}"; name="${pair##*:}"
   if [[ -d "$dst" ]]; then

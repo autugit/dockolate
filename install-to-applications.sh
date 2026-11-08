@@ -17,11 +17,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/build"
 DEST=/Applications
 STAMP="$(date +%Y%m%d-%H%M%S)"
-PREV="$HOME/Applications/_prev"
 OWNER="${SUDO_USER:-$(id -un)}"
 TARGET_UID="${SUDO_UID:-$(id -u)}"
+# 注意：sudo 会把 $HOME 改成 /var/root，所以一律按 OWNER 反查家目录
+OWNER_HOME="$(eval echo "~$OWNER")"
+PREV="$OWNER_HOME/Applications/_prev"
 HUB_LABEL="gui/$TARGET_UID/ai.local.model-hub"
-HUB_PLIST="$HOME/Library/LaunchAgents/ai.local.model-hub.plist"
+HUB_PLIST="$OWNER_HOME/Library/LaunchAgents/ai.local.model-hub.plist"
 
 for A in Dockolate DockolateHub; do
   [ -d "$SRC/$A.app" ] || { echo "✗ 找不到 $SRC/$A.app —— 先在仓里跑 bash build.sh"; exit 1; }
@@ -29,6 +31,20 @@ done
 mkdir -p "$PREV"
 
 sha() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# 清扫历史残留：/Applications 里 _Dockolate*.app 这类「旧版改名包」是早期替换流程留下的
+# 孤儿（没有任何 LaunchAgent 引用），会让「应用程序」里堆出一排重复图标。
+# 一律挪进 _prev 留档，不删除。
+shopt -s nullglob
+for STALE in "$DEST"/_Dockolate*.app; do
+  NAME="$(basename "$STALE" .app)"
+  if mv "$STALE" "$PREV/$NAME-$STAMP.app" 2>/dev/null; then
+    echo "· 残留已归位 $PREV/$NAME-$STAMP.app"
+  else
+    echo "⚠ 残留 $NAME 挪不动（属主 root？先 sudo chown -R $OWNER \"$STALE\"）"
+  fi
+done
+shopt -u nullglob
 
 # 中枢在跑就先停：运行中的 app bundle 会让 mv 被系统拒掉
 if launchctl print "$HUB_LABEL" >/dev/null 2>&1; then
