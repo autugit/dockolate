@@ -43,6 +43,7 @@ echo "==> 图标"
 # 结果落在 build/icon/Dockolate.icns。这里只负责拷进 bundle：
 # 把出图/渲染从构建脚本里拆出去，构建过程不依赖图片素材，也不引入外部读取。
 ICNS="build/icon/Dockolate.icns"
+HUB_ICNS="build/icon/DockolateHub.icns"
 if [[ -f "$ICNS" ]]; then
   cp "$ICNS" "$APP/Contents/Resources/Dockolate.icns"
 else
@@ -85,6 +86,12 @@ rm -rf "$HUB_APP"
 mkdir -p "$HUB_APP/Contents/MacOS" "$HUB_APP/Contents/Resources"
 cp "$APP/Contents/MacOS/$APP_NAME" "$HUB_APP/Contents/MacOS/$APP_NAME"
 [[ -f resources/adapters.json ]] && cp resources/adapters.json "$HUB_APP/Contents/Resources/" || true
+# 中枢有自己的图标：同一块巧克力板，但中心是一枚琥珀接点（不是字母）
+if [[ -f "$HUB_ICNS" ]]; then
+  cp "$HUB_ICNS" "$HUB_APP/Contents/Resources/DockolateHub.icns"
+else
+  echo "    ⚠ 无 DockolateHub.icns（跑：python3 tools/icon_from_image.py resources/hub-icon-source.png build/icon --name=DockolateHub --variant=hub）"
+fi
 cat > "$HUB_APP/Contents/Info.plist" <<HUBPLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -97,6 +104,7 @@ cat > "$HUB_APP/Contents/Info.plist" <<HUBPLIST
     <key>CFBundleVersion</key>           <string>1.8.3</string>
     <key>CFBundleShortVersionString</key><string>1.8.3</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>CFBundleIconFile</key>          <string>DockolateHub</string>
     <key>LSMinimumSystemVersion</key>    <string>13.0</string>
     <key>LSUIElement</key>               <true/>
     <!-- 2026-11-06：只靠 LSUIElement + setActivationPolicy(.prohibited) 不够 ——
@@ -119,7 +127,7 @@ write_manifest() {
     # 只列**资源**：可执行文件的完整性由代码签名负责（内核 + codesign --verify），
     # 它的字节在签名后会被改写，放进哈希清单必然对不上（实测踩过）。
     local first=1 f hash size
-    for f in "Contents/Resources/adapters.json" "Contents/Resources/$APP_NAME.icns"; do
+    for f in "Contents/Resources/adapters.json" "Contents/Resources/$APP_NAME.icns" "Contents/Resources/DockolateHub.icns"; do
       [[ -f "$BUNDLE/$f" ]] || continue
       hash=$(shasum -a 256 "$BUNDLE/$f" | awk '{print $1}')
       size=$(stat -f%z "$BUNDLE/$f")

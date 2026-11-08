@@ -435,3 +435,22 @@ Dockolate --doctor                                                # 完整性/�
 
 契约与字段说明见 [`docs/CLI_API.md`](docs/CLI_API.md)；发布版安装（`/Applications`，root 只读）
 见 `tools/install-system.command`。
+
+## 两套图标（同一块巧克力，两种身份）
+
+| 包 | 图标 | 小尺寸剪影 |
+|---|---|---|
+| `Dockolate.app`（GUI） | 2×2 巧克力板，四格各刻一个字母 **C / G / M / Z**，左上角有融化淋面 | ≤32 px：四格 + **左上角一格点亮** |
+| `DockolateHub.app`（中枢） | 同一块板、同一淋面、同一光位，**四格不刻字** —— 十字凹槽交点嵌一枚**琥珀色半球接点**（≈一格直径的 45%） | ≤32 px：四格同色 + **中心一枚琥珀圆点** |
+
+同一系列靠「巧克力板 + 左上淋面 + 哑光深棕背景」认出是一家；不同靠**身份色块的位置**——GUI 在左上角，中枢在正中。
+`≤32 px` 的剪影是程序化重绘的（写实图缩到 16 px 只会剩一团棕），不是缩放得来的。
+
+生成命令（源图在 `resources/`，`build.sh` 只负责把成品 icns 拷进包）：
+
+```bash
+python3 tools/icon_from_image.py resources/icon-source.jpg     build/icon --name=Dockolate              --variant=dock
+python3 tools/icon_from_image.py resources/hub-icon-source.jpg build/icon --name=DockolateHub --variant=hub
+```
+
+只换中枢一个包：`bash tools/install-hub-app.command`（旧包挪 `~/Applications/_prev`，不删除）。
