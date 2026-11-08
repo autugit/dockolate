@@ -166,8 +166,67 @@ def render_small(n: int) -> Image.Image:
         cr = max(1.2, cell * 0.23)
         cx = cy = n / 2
         d.ellipse([cx - cr, cy - cr, cx + cr, cy + cr], fill=amber)
-    im.putalpha(rounded_mask(n, ss=8))
+    im.putalpha(squircle_mask(n, ss=8))
     return im
+
+
+def squircle_mask(size: int, ss: int = 4, exponent: float = 5.0, inset: float = 0.0) -> Image.Image:
+    """macOS 图标本体形状：超椭圆（squircle），不是普通的圆角矩形。
+
+    Apple 的图标轮廓是连续曲率的超椭圆，|x|^n + |y|^n = 1（n≈5）；用
+    rounded_rectangle 画出来四角会显得「方」一点，正是「圆角不像 macOS」的来源。
+    这里按参数方程采样成多边形，再在 ss 倍画布上填充，缩回来即抗锯齿。
+    """
+    import math
+    big = size * ss
+    a = big / 2.0 * (1.0 - inset)
+    pts = []
+    steps = 2048
+    for i in range(steps):
+        t = 2.0 * math.pi * i / steps
+        ct, st = math.cos(t), math.sin(t)
+        x = math.copysign(abs(ct) ** (2.0 / exponent), ct)
+        y = math.copysign(abs(st) ** (2.0 / exponent), st)
+        pts.append((big / 2.0 + x * a, big / 2.0 + y * a))
+    m = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(m).polygon(pts, fill=255)
+    return m.resize((size, size), Image.LANCZOS)
+
+
+def trim_to_body(im: Image.Image, size: int) -> Image.Image:
+    """把「画在白底上、自带圆角」的图标裁到本体轮廓并缩放到 size。
+
+    用途：让出图模型按 macOS 图标规范自己把圆角和倒角画进图里（--trim），
+    我们只负责把本体抠出来对齐到 1024 —— 不再程序化加倒角，避免和模型的画法打架。
+    判据：明显比白底暗的像素 = 本体；投影很淡，阈值取 200 就能避开。
+    """
+    gray = im.convert("L")
+    mask = gray.point(lambda v: 255 if v < 200 else 0)
+    box = mask.getbbox()
+    if not box:
+        return im.resize((size, size), Image.LANCZOS)
+    x0, y0, x1, y1 = box
+    # 白底图上，括号边缘常常还有 1~3 px 接近纯白的描边/残影：向内收到不再发白为止，
+    # 否则贴好遮罩后会出现一圈白边
+    px = gray.load()
+    def ring_mean(x0, y0, x1, y1):
+        vals = []
+        for x in range(x0, x1, max(1, (x1 - x0) // 64)):
+            vals += [px[x, y0], px[x, y1 - 1]]
+        for y in range(y0, y1, max(1, (y1 - y0) // 64)):
+            vals += [px[x0, y], px[x1 - 1, y]]
+        return sum(vals) / max(1, len(vals))
+    inset = 0
+    while inset < 40 and x1 - x0 > 32 and y1 - y0 > 32 and ring_mean(x0, y0, x1, y1) > 215:
+        x0 += 1; y0 += 1; x1 -= 1; y1 -= 1; inset += 1
+    # 取**较小**的那条边做正方形：宁可往里收几像素，也不要把白底带进来
+    side = min(x1 - x0, y1 - y0)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    W, H = im.size
+    left = min(max(cx - side / 2.0, 0), W - side)
+    top = min(max(cy - side / 2.0, 0), H - side)
+    return im.crop((int(round(left)), int(round(top)),
+                    int(round(left + side)), int(round(top + side)))).resize((size, size), Image.LANCZOS)
 
 
 def main() -> int:
@@ -179,6 +238,7 @@ def main() -> int:
     out_dir = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "build/icon"
     zoom = 0.86          # 裁掉多少边缘：越小主体越大、留白越少（--crop 给了就不用它）
     name = "Dockolate"   # icns / iconset 基名
+    TRIM = False         # --trim：图里已经自带圆角+倒角，只抠本体对齐
     crop = None          # --crop=L,T,R,B（百分比），直接框住巧克力板、顶满图标
     for a in sys.argv[1:]:
         if a.startswith("--zoom="):
@@ -187,6 +247,8 @@ def main() -> int:
             name = a.split("=", 1)[1]
         elif a.startswith("--variant="):
             VARIANT = a.split("=", 1)[1]
+        elif a == "--trim":
+            TRIM = True
         elif a.startswith("--crop="):
             crop = [float(v) / 100.0 for v in a.split("=", 1)[1].split(",")]
             if len(crop) != 4:
@@ -197,7 +259,9 @@ def main() -> int:
 
     im = Image.open(src).convert("RGBA")
     w, h = im.size
-    if crop is not None:
+    if TRIM:
+        im = trim_to_body(im, FINAL)
+    elif crop is not None:
         l, t, r, b = crop
         x0, y0, x1, y1 = l * w, t * h, r * w, b * h
         # 不是正方形就先扩成正方形（以框中心为准，不拉伸变形）
@@ -225,7 +289,7 @@ def main() -> int:
 
     # 柔和暗角：把四角压暗一点，让巧克力主体从同色背景里分离出来
     # （--crop 顶满画面时不再压角：四角已经是巧克力本体，压暗会脏）
-    if crop is None:
+    if crop is None and not TRIM:
         vig = Image.new("L", (FINAL, FINAL), 0)
         vd = ImageDraw.Draw(vig)
         vd.ellipse([-int(FINAL * 0.18), -int(FINAL * 0.18),
@@ -234,7 +298,7 @@ def main() -> int:
         dark = Image.new("RGBA", (FINAL, FINAL), (26, 14, 8, 255))
         im = Image.composite(im, Image.blend(im, dark, 0.42), vig)
 
-    mask = rounded_mask(FINAL)
+    mask = squircle_mask(FINAL)      # macOS 图标本体是超椭圆，不是圆角矩形
     im.putalpha(mask)
 
     # 顶满（--crop）时给边缘加一圈内收倒角：按 SDF 做法线光照（无 numpy 时退回老版）

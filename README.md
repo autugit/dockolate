@@ -444,16 +444,15 @@ Dockolate --doctor                                                # 完整性/�
 | `DockolateHub.app`（中枢） | 同一块板、同一淋面、同一光位，**四格不刻字** —— 十字交点压着**一大滴半透明蜂蜜**（不规则、带下坠蜜丝） | ≤32 px：四格同色 + **中心一枚琥珀圆点** |
 
 - 同一系列靠「巧克力板 + 左上淋面 + 哑光深棕 + 边缘倒角」认出是一家；不同靠**身份色块的位置**——GUI 在左上角，中枢在正中。
-- **顶满**：源图要求生成成满版（四格到画布四边），`--crop=0,0,100,100` 直接按整帧裁，`pad` 收到 ~1% 写小尺寸剪影。
-- **内收倒角**：`apply_chamfer()` 先算圆角矩形的有符号距离场，把边缘 ~3% 宽的一圈表面法线从「朝上」逐渐转到「朝外」（那就是斜边），再用左上方一束平行光算法线光照（漫反射 + Blinn 高光）。四个角由同一套几何算出来，明暗自然统一；用「一圈亮带 + 斜向渐变」近似会有左上过亮、右下发虚的病。倒角必须严格贴着遮罩边界，不能交给出图模型。
-- **抗锯齿圆角**：遮罩在 4 倍画布上画再缩回（`rounded_mask()`）——直接 fill 出来的是硬边台阶，放大看就是「圆角不圆」。
-- `≤32 px` 的剪影是程序化重绘的（写实图缩到 16 px 只会剩一团棕），不是缩放得来的。
-
+- **顶满 + 自带圆角**：源图直接按 macOS 图标规范出图（正方形、圆角方形本体、外轮廓一圈内收倒角），并且把一张「标准形状参考图」一起喂给模型（`build/icon/redraw/shape-ref.png` 的做法）；`--trim` 只负责把本体从白底上抠出来、对齐到 1024，不再程序化加倒角——模型画的倒角和我们的假倒角会打架。
+- **超椭圆遮罩**：macOS 图标本体是 squircle（|x|^n+|y|^n=1，n≈5），不是圆角矩形；`squircle_mask()` 按参数方程采样成多边形再超采样，四角才「饱满连续」，普通圆角矩形会显得略方。
+- **抠图去白边**：白底出图的边缘常有 1~3 px 近白描边和很淡的投影，`trim_to_body()` 会向内收到不再发白为止，并用较小的一条边取正方形，宁可少几像素也不把白底带进来。
+- **程序化倒角仍在**（`apply_chamfer()`，圆角矩形 SDF + 法线光照），只在不出图、直接拿旧素材走 `--crop` 时才用；`--trim` 这条路不用它。
 生成命令（源图在 `resources/`，`build.sh` 只负责把成品 icns 拷进包）：
 
 ```bash
-python3 tools/icon_from_image.py resources/icon-source.jpg     build/icon --name=Dockolate   --variant=dock --crop=0,0,100,100
-python3 tools/icon_from_image.py resources/hub-icon-source.jpg build/icon --name=DockolateHub --variant=hub  --crop=0,0,100,100
+python3 tools/icon_from_image.py resources/icon-source.jpg     build/icon --name=Dockolate   --variant=dock --trim
+python3 tools/icon_from_image.py resources/hub-icon-source.jpg build/icon --name=DockolateHub --variant=hub  --trim
 ```
 
 不给 `--crop` 时退回旧行为（居中方形裁切 + `--zoom` 留边 + 暗角），老命令照旧可用。
