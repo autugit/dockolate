@@ -440,17 +440,21 @@ Dockolate --doctor                                                # 完整性/�
 
 | 包 | 图标 | 小尺寸剪影 |
 |---|---|---|
-| `Dockolate.app`（GUI） | 2×2 巧克力板，四格各刻一个字母 **C / G / M / Z**，左上角有融化淋面 | ≤32 px：四格 + **左上角一格点亮** |
-| `DockolateHub.app`（中枢） | 同一块板、同一淋面、同一光位，**四格不刻字** —— 十字凹槽交点嵌一枚**琥珀色半球接点**（≈一格直径的 45%） | ≤32 px：四格同色 + **中心一枚琥珀圆点** |
+| `Dockolate.app`（GUI） | 2×2 巧克力板**顶满整个图标**（无背景留边），四格各刻一个字母 **C / G / M / Z**，左上角融化淋面从图标边缘流下 | ≤32 px：四格 + **左上角一格点亮** |
+| `DockolateHub.app`（中枢） | 同一块板、同一淋面、同一光位，**四格不刻字** —— 十字交点压着**一大滴半透明蜂蜜**（不规则、带下坠蜜丝） | ≤32 px：四格同色 + **中心一枚琥珀圆点** |
 
-同一系列靠「巧克力板 + 左上淋面 + 哑光深棕背景」认出是一家；不同靠**身份色块的位置**——GUI 在左上角，中枢在正中。
-`≤32 px` 的剪影是程序化重绘的（写实图缩到 16 px 只会剩一团棕），不是缩放得来的。
+- 同一系列靠「巧克力板 + 左上淋面 + 哑光深棕 + 边缘倒角」认出是一家；不同靠**身份色块的位置**——GUI 在左上角，中枢在正中。
+- **顶满**：源图要求生成成满版（四格到画布四边），`--crop=0,0,100,100` 直接按整帧裁，`pad` 收到 ~1% 写小尺寸剪影。
+- **内收倒角**：圆角遮罩之后由 `apply_bevel()` 程序化加一圈「斜边」——受光侧暖高光、背光侧压暗，都做高斯柔化（硬描边会像贴纸）。倒角必须严格贴着遮罩边界，所以不能交给出图模型。
+- `≤32 px` 的剪影是程序化重绘的（写实图缩到 16 px 只会剩一团棕），不是缩放得来的。
 
 生成命令（源图在 `resources/`，`build.sh` 只负责把成品 icns 拷进包）：
 
 ```bash
-python3 tools/icon_from_image.py resources/icon-source.jpg     build/icon --name=Dockolate              --variant=dock
-python3 tools/icon_from_image.py resources/hub-icon-source.jpg build/icon --name=DockolateHub --variant=hub
+python3 tools/icon_from_image.py resources/icon-source.jpg     build/icon --name=Dockolate   --variant=dock --crop=0,0,100,100
+python3 tools/icon_from_image.py resources/hub-icon-source.jpg build/icon --name=DockolateHub --variant=hub  --crop=0,0,100,100
 ```
+
+不给 `--crop` 时退回旧行为（居中方形裁切 + `--zoom` 留边 + 暗角），老命令照旧可用。
 
 只换中枢一个包：`bash tools/install-hub-app.command`（旧包挪 `~/Applications/_prev`，不删除）。
